@@ -1,5 +1,11 @@
 import { useEffect } from "react";
-import { data, isRouteErrorResponse, Link, useFetcher } from "react-router";
+import {
+  data,
+  isRouteErrorResponse,
+  Link,
+  useFetcher,
+  useSearchParams,
+} from "react-router";
 import { eq } from "drizzle-orm";
 import { toast } from "sonner";
 import { z } from "zod";
@@ -21,11 +27,12 @@ import { cn, formatPrice } from "~/lib/utils";
 import { Card, CardContent } from "~/components/ui/card";
 import { Button } from "~/components/ui/button";
 import { Skeleton } from "~/components/ui/skeleton";
+import { Tabs, TabsList, TabsTrigger } from "~/components/ui/tabs";
 
 export function meta() {
   return [
     { title: "Refund requests — Cadence" },
-    { name: "description", content: "Open refund requests" },
+    { name: "description", content: "Open and resolved refund requests" },
   ];
 }
 
@@ -52,9 +59,29 @@ async function requireAdminUserId(request: Request): Promise<number> {
   return currentUser.id;
 }
 
+// The tab lives in `?status=` so it survives a reload. Anything else is Open.
+const tabs = z.enum(["open", "approved", "declined"]);
+const tabSchema = tabs.catch("open");
+type Tab = z.infer<typeof tabs>;
+
+const TAB_STATUS: Record<Tab, RefundStatus> = {
+  open: RefundStatus.Requested,
+  approved: RefundStatus.Approved,
+  declined: RefundStatus.Declined,
+};
+
+const TAB_LABELS: Record<Tab, string> = {
+  open: "Open",
+  approved: "Approved",
+  declined: "Declined",
+};
+
 export async function loader({ request }: Route.LoaderArgs) {
   await requireAdminUserId(request);
-  return { refundRequests: listRefundRequests(db, RefundStatus.Requested) };
+  const tab = tabSchema.parse(
+    new URL(request.url).searchParams.get("status") ?? undefined
+  );
+  return { tab, refundRequests: listRefundRequests(db, TAB_STATUS[tab]) };
 }
 
 // Each intent resolves one Refund Request.
@@ -148,11 +175,25 @@ const columns = [
   "Actions",
 ];
 
-function TableHead() {
+// Resolved requests are final: no usage warnings and no actions, but who
+// resolved them and when, plus the Amount Refunded on Approved ones.
+function resolvedColumns(tab: Exclude<Tab, "open">) {
+  return [
+    "Learner",
+    "Course",
+    "Requested",
+    "Reason",
+    "Resolved by",
+    "Resolved",
+    ...(tab === "approved" ? ["Amount refunded"] : []),
+  ];
+}
+
+function TableHead({ labels = columns }: { labels?: string[] }) {
   return (
     <thead>
       <tr className="border-b border-border bg-muted/50">
-        {columns.map((column) => (
+        {labels.map((column) => (
           <th key={column} className={headerCellClass}>
             {column}
           </th>
@@ -297,6 +338,49 @@ function RefundRequestRow({ request }: { request: RefundRequestListItem }) {
   );
 }
 
+function ResolvedRefundRequestRow({
+  request,
+}: {
+  request: RefundRequestListItem;
+}) {
+  return (
+    <tr className="border-b border-border last:border-0 align-top">
+      <td className="px-4 py-3">
+        <div className="text-sm font-medium">{request.learner.name}</div>
+        <div className="text-xs text-muted-foreground">
+          {request.learner.email}
+        </div>
+      </td>
+      <td className="px-4 py-3 text-sm">{request.course.title}</td>
+      <td className="px-4 py-3 text-sm whitespace-nowrap text-muted-foreground">
+        {formatDate(request.requestedAt)}
+      </td>
+      <td className="max-w-xs px-4 py-3 text-sm whitespace-pre-wrap">
+        {request.reason}
+      </td>
+      <td className="px-4 py-3 text-sm whitespace-nowrap">
+        {request.resolvedBy?.name ?? "—"}
+      </td>
+      <td className="px-4 py-3 text-sm whitespace-nowrap text-muted-foreground">
+        {request.resolvedAt ? formatDate(request.resolvedAt) : "—"}
+      </td>
+      {request.status === RefundStatus.Approved && (
+        <td className="px-4 py-3 text-sm whitespace-nowrap">
+          {request.amountRefunded === null
+            ? "—"
+            : formatPrice(request.amountRefunded)}
+        </td>
+      )}
+    </tr>
+  );
+}
+
+const TAB_DESCRIPTIONS: Record<Tab, string> = {
+  open: "Open refund requests, oldest first. Watched time and completion are the learner's progress now.",
+  approved: "Approved refund requests, most recently resolved first.",
+  declined: "Declined refund requests, most recently resolved first.",
+};
+
 export function HydrateFallback() {
   return (
     <div className="mx-auto max-w-7xl p-6 lg:p-8">
@@ -330,7 +414,16 @@ export function HydrateFallback() {
 }
 
 export default function AdminRefunds({ loaderData }: Route.ComponentProps) {
-  const { refundRequests } = loaderData;
+  const { tab, refundRequests } = loaderData;
+  const [, setSearchParams] = useSearchParams();
+  const tabName = TAB_LABELS[tab].toLowerCase();
+
+  function selectTab(value: string) {
+    const next = tabSchema.parse(value);
+    setSearchParams(next === "open" ? {} : { status: next }, {
+      preventScrollReset: true,
+    });
+  }
 
   return (
     <div className="mx-auto max-w-7xl p-6 lg:p-8">
@@ -344,16 +437,23 @@ export default function AdminRefunds({ loaderData }: Route.ComponentProps) {
 
       <div className="mb-8">
         <h1 className="text-3xl font-bold">Refund requests</h1>
-        <p className="mt-1 text-muted-foreground">
-          Open refund requests, oldest first. Watched time and completion are
-          the learner's progress now.
-        </p>
+        <p className="mt-1 text-muted-foreground">{TAB_DESCRIPTIONS[tab]}</p>
       </div>
+
+      <Tabs value={tab} onValueChange={selectTab} className="mb-4">
+        <TabsList>
+          {tabs.options.map((value) => (
+            <TabsTrigger key={value} value={value}>
+              {TAB_LABELS[value]}
+            </TabsTrigger>
+          ))}
+        </TabsList>
+      </Tabs>
 
       <div className="mb-4 flex items-center gap-2 text-sm text-muted-foreground">
         <ReceiptText className="size-4" />
         <span>
-          {refundRequests.length} open{" "}
+          {refundRequests.length} {tabName}{" "}
           {refundRequests.length === 1 ? "refund request" : "refund requests"}
         </span>
       </div>
@@ -362,7 +462,9 @@ export default function AdminRefunds({ loaderData }: Route.ComponentProps) {
         <Card>
           <CardContent className="py-8 text-center">
             <ReceiptText className="mx-auto mb-3 size-8 text-muted-foreground/50" />
-            <p className="text-muted-foreground">No open refund requests.</p>
+            <p className="text-muted-foreground">
+              No {tabName} refund requests.
+            </p>
           </CardContent>
         </Card>
       ) : (
@@ -370,12 +472,28 @@ export default function AdminRefunds({ loaderData }: Route.ComponentProps) {
           <CardContent className="p-0">
             <div className="overflow-x-auto">
               <table className="w-full">
-                <TableHead />
-                <tbody>
-                  {refundRequests.map((request) => (
-                    <RefundRequestRow key={request.id} request={request} />
-                  ))}
-                </tbody>
+                {tab === "open" ? (
+                  <>
+                    <TableHead />
+                    <tbody>
+                      {refundRequests.map((request) => (
+                        <RefundRequestRow key={request.id} request={request} />
+                      ))}
+                    </tbody>
+                  </>
+                ) : (
+                  <>
+                    <TableHead labels={resolvedColumns(tab)} />
+                    <tbody>
+                      {refundRequests.map((request) => (
+                        <ResolvedRefundRequestRow
+                          key={request.id}
+                          request={request}
+                        />
+                      ))}
+                    </tbody>
+                  </>
+                )}
               </table>
             </div>
           </CardContent>
