@@ -1,5 +1,5 @@
 import type { BetterSQLite3Database } from "drizzle-orm/better-sqlite3";
-import { and, desc, eq, inArray, isNotNull, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNotNull, sql } from "drizzle-orm";
 import * as schema from "~/db/schema";
 
 /** The app's drizzle instance, or a `createTestDb()` in tests. */
@@ -203,4 +203,79 @@ export function canOpenRefundRequest(
     return { eligible: false, reason: "watch-limit-reached" };
   }
   return { eligible: true };
+}
+
+// ─── Listing Refund Requests ───
+
+export type RefundRequestListItem = {
+  id: number;
+  purchaseId: number;
+  learner: { id: number; name: string; email: string };
+  course: { id: number; title: string };
+  reason: string;
+  requestedAt: string;
+  /** What the learner actually paid, never the course's current list price. */
+  refundableAmount: number;
+  /** The learner's watched time on the course now, not when they asked. */
+  watchedSeconds: number;
+  /** The learner's completion (0–1) of the course now. */
+  completionFraction: number;
+  /** At or over the Watch Limit. A warning for the admin, not a rule. */
+  isOverWatchLimit: boolean;
+  /** At or over the Completion Limit. A warning for the admin, not a rule. */
+  isOverCompletionLimit: boolean;
+};
+
+/**
+ * Refund Requests with the given status (`RefundStatus.Requested` is Open),
+ * oldest request first.
+ */
+export function listRefundRequests(
+  db: RefundsDb,
+  status: schema.RefundStatus
+): RefundRequestListItem[] {
+  const requests = db
+    .select({
+      id: schema.refunds.id,
+      purchaseId: schema.refunds.purchaseId,
+      learner: {
+        id: schema.users.id,
+        name: schema.users.name,
+        email: schema.users.email,
+      },
+      course: { id: schema.courses.id, title: schema.courses.title },
+      reason: schema.refunds.reason,
+      requestedAt: schema.refunds.requestedAt,
+      refundableAmount: schema.purchases.amountPaid,
+    })
+    .from(schema.refunds)
+    .innerJoin(
+      schema.purchases,
+      eq(schema.refunds.purchaseId, schema.purchases.id)
+    )
+    .innerJoin(schema.users, eq(schema.purchases.userId, schema.users.id))
+    .innerJoin(schema.courses, eq(schema.purchases.courseId, schema.courses.id))
+    .where(eq(schema.refunds.status, status))
+    .orderBy(asc(schema.refunds.requestedAt), asc(schema.refunds.id))
+    .all();
+
+  return requests.map((request) => {
+    const watchedSeconds = getWatchedSeconds(
+      db,
+      request.learner.id,
+      request.course.id
+    );
+    const completionFraction = getCompletionFraction(
+      db,
+      request.learner.id,
+      request.course.id
+    );
+    return {
+      ...request,
+      watchedSeconds,
+      completionFraction,
+      isOverWatchLimit: watchedSeconds >= MAX_WATCHED_SECONDS,
+      isOverCompletionLimit: completionFraction >= CANCEL_COMPLETION_LIMIT,
+    };
+  });
 }
