@@ -9,6 +9,7 @@ import { db } from "~/db";
 import { RefundStatus, UserRole, users } from "~/db/schema";
 import { getCurrentUserId } from "~/lib/session";
 import {
+  approveRefundRequest,
   declineRefundRequest,
   listRefundRequests,
   type RefundRequestListItem,
@@ -56,9 +57,12 @@ export async function loader({ request }: Route.LoaderArgs) {
   return { refundRequests: listRefundRequests(db, RefundStatus.Requested) };
 }
 
-// Each intent resolves one Refund Request. Approve (#7) adds an `approve`
-// member here and a branch below.
+// Each intent resolves one Refund Request.
 const resolveActionSchema = z.discriminatedUnion("intent", [
+  z.object({
+    intent: z.literal("approve"),
+    refundRequestId: z.coerce.number().int(),
+  }),
   z.object({
     intent: z.literal("decline"),
     refundRequestId: z.coerce.number().int(),
@@ -74,6 +78,8 @@ function resolve(
   now: Date
 ): ResolveRefundRequestResult {
   switch (intent) {
+    case "approve":
+      return approveRefundRequest(db, refundRequestId, adminUserId, now);
     case "decline":
       return declineRefundRequest(db, refundRequestId, adminUserId, now);
   }
@@ -82,6 +88,7 @@ function resolve(
 const ALREADY_RESOLVED_MESSAGE = "This refund request was already resolved";
 
 const RESOLVED_MESSAGES: Record<ResolveIntent, string> = {
+  approve: "Refund approved.",
   decline: "Refund declined.",
 };
 
@@ -199,31 +206,58 @@ function ResolveActions({ request }: { request: RefundRequestListItem }) {
     );
   }
 
+  const isSubmitting = fetcher.state !== "idle";
+
   return (
-    <ConfirmDialog
-      trigger={
-        <Button
-          variant="outline"
-          size="sm"
-          disabled={fetcher.state !== "idle"}
-        >
-          Decline
-        </Button>
-      }
-      title="Decline this refund request?"
-      description={
-        <>
-          <p>
-            {request.learner.name} keeps access to {request.course.title} and
-            no refund is recorded.
-          </p>
-          <p>A resolved refund request is final.</p>
-        </>
-      }
-      confirmLabel="Decline"
-      confirmVariant="destructive"
-      onConfirm={() => submit("decline")}
-    />
+    <div className="flex justify-end gap-2">
+      {/* Team purchases (#8) add their seat counts and a warning here. */}
+      <ConfirmDialog
+        trigger={
+          <Button size="sm" disabled={isSubmitting}>
+            Mark refund approved
+          </Button>
+        }
+        title="Mark this refund approved?"
+        description={
+          <>
+            <p>
+              Confirm you've already refunded{" "}
+              <strong className="text-foreground">
+                {formatPrice(request.refundableAmount)}
+              </strong>{" "}
+              to the learner. Approving removes their access to{" "}
+              <em>{request.course.title}</em> now.
+            </p>
+            <p>
+              Their progress is kept if they buy the course again. A resolved
+              refund request is final.
+            </p>
+          </>
+        }
+        confirmLabel="Mark refund approved"
+        onConfirm={() => submit("approve")}
+      />
+      <ConfirmDialog
+        trigger={
+          <Button variant="outline" size="sm" disabled={isSubmitting}>
+            Decline
+          </Button>
+        }
+        title="Decline this refund request?"
+        description={
+          <>
+            <p>
+              {request.learner.name} keeps access to {request.course.title} and
+              no refund is recorded.
+            </p>
+            <p>A resolved refund request is final.</p>
+          </>
+        }
+        confirmLabel="Decline"
+        confirmVariant="destructive"
+        onConfirm={() => submit("decline")}
+      />
+    </div>
   );
 }
 
