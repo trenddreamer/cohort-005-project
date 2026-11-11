@@ -23,7 +23,7 @@ const refundActionSchema = z.object({
   reason: z
     .string()
     .trim()
-    .min(10, "Tell us a little more about why you want to cancel.")
+    .min(10, "Tell us a little more about why you want a refund.")
     .max(1000, "Please keep your reason under 1000 characters."),
 });
 
@@ -31,26 +31,27 @@ const ineligibleResponses: Record<
   RefundIneligibleReason,
   { message: string; status: number }
 > = {
-  "open-refund-request": {
-    message: "You already have a request open on this purchase.",
+  // Each purchase gets one Refund Request, whatever became of it.
+  "refund-request-exists": {
+    message: "You have already made a refund request on this purchase.",
     status: 409,
   },
   // A seat that came out of a team licence, and has been claimed, belongs to
   // the team — the learner cannot hand it back on their own.
   "claimed-seat": {
-    message: "A claimed team seat cannot be cancelled.",
+    message: "A team purchase with a claimed seat can't be refunded.",
     status: 403,
   },
   "outside-refund-window": {
-    message: `The ${REFUND_WINDOW_DAYS}-day window has closed.`,
+    message: `The ${REFUND_WINDOW_DAYS}-day refund window has closed.`,
     status: 403,
   },
   "completion-limit-reached": {
-    message: "You have completed too much of this course to cancel it.",
+    message: "You have completed too much of this course to request a refund.",
     status: 403,
   },
   "watch-limit-reached": {
-    message: "You have watched too much of this course to cancel it.",
+    message: "You have watched too much of this course to request a refund.",
     status: 403,
   },
 };
@@ -89,7 +90,7 @@ export async function action({ params, request }: Route.ActionArgs) {
   const currentUserId = await getCurrentUserId(request);
 
   if (!currentUserId) {
-    throw data("You must be logged in to cancel a purchase.", { status: 401 });
+    throw data("You must be logged in to request a refund.", { status: 401 });
   }
 
   const { slug } = parseParams(params, refundParamsSchema);

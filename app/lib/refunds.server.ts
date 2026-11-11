@@ -15,10 +15,10 @@ export const MAX_WATCHED_HOURS = 2;
 const MAX_WATCHED_SECONDS = MAX_WATCHED_HOURS * 60 * 60;
 
 /** Completion Limit: this fraction of lessons completed blocks a Refund Request. */
-export const CANCEL_COMPLETION_LIMIT = 0.5;
+export const COMPLETION_LIMIT = 0.5;
 
 export type RefundIneligibleReason =
-  | "open-refund-request"
+  | "refund-request-exists"
   | "claimed-seat"
   | "outside-refund-window"
   | "completion-limit-reached"
@@ -141,17 +141,16 @@ export function getLatestPurchase(
     .get();
 }
 
-/** The Open Refund Request on a purchase, if there is one. */
-export function getOpenRefundRequest(db: RefundsDb, purchaseId: number) {
+/**
+ * The purchase's Refund Request, whatever its status, if it has one. Each
+ * purchase gets one Refund Request.
+ */
+export function getRefundRequest(db: RefundsDb, purchaseId: number) {
   return db
     .select()
     .from(schema.refunds)
-    .where(
-      and(
-        eq(schema.refunds.purchaseId, purchaseId),
-        eq(schema.refunds.status, schema.RefundStatus.Requested)
-      )
-    )
+    .where(eq(schema.refunds.purchaseId, purchaseId))
+    .orderBy(desc(schema.refunds.requestedAt))
     .get();
 }
 
@@ -182,8 +181,8 @@ export function canOpenRefundRequest(
   user: { id: number },
   now: Date
 ): RefundEligibility {
-  if (getOpenRefundRequest(db, purchase.id)) {
-    return { eligible: false, reason: "open-refund-request" };
+  if (getRefundRequest(db, purchase.id)) {
+    return { eligible: false, reason: "refund-request-exists" };
   }
   if (hasClaimedSeat(db, purchase.id)) {
     return { eligible: false, reason: "claimed-seat" };
@@ -193,7 +192,7 @@ export function canOpenRefundRequest(
   }
   if (
     getCompletionFraction(db, user.id, purchase.courseId) >=
-    CANCEL_COMPLETION_LIMIT
+    COMPLETION_LIMIT
   ) {
     return { eligible: false, reason: "completion-limit-reached" };
   }

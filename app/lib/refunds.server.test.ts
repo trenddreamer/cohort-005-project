@@ -4,6 +4,7 @@ import * as schema from "~/db/schema";
 import {
   canOpenRefundRequest,
   getCompletionFraction,
+  getRefundRequest,
   getWatchedSeconds,
 } from "./refunds.server";
 
@@ -292,13 +293,17 @@ describe("canOpenRefundRequest", () => {
     ).toEqual({ eligible: false, reason: "claimed-seat" });
   });
 
-  // ─── Open Refund Request ───
+  // ─── One Refund Request per purchase ───
+
+  function addRefundRequest(purchaseId: number, status: schema.RefundStatus) {
+    db.insert(schema.refunds)
+      .values({ purchaseId, status, reason: "Not what I expected" })
+      .run();
+  }
 
   it("refuses when an Open Refund Request already exists on the purchase", () => {
     const purchase = buyCourse("2026-03-01T10:00:00");
-    db.insert(schema.refunds)
-      .values({ purchaseId: purchase.id, reason: "Not what I expected" })
-      .run();
+    addRefundRequest(purchase.id, schema.RefundStatus.Requested);
 
     expect(
       canOpenRefundRequest(
@@ -307,7 +312,53 @@ describe("canOpenRefundRequest", () => {
         base.user,
         new Date("2026-03-02T10:00:00")
       )
-    ).toEqual({ eligible: false, reason: "open-refund-request" });
+    ).toEqual({ eligible: false, reason: "refund-request-exists" });
+  });
+
+  // Once Declined, the learner can't ask again on the same purchase.
+  it("refuses when the purchase's Refund Request was Declined", () => {
+    const purchase = buyCourse("2026-03-01T10:00:00");
+    addRefundRequest(purchase.id, schema.RefundStatus.Declined);
+
+    expect(
+      canOpenRefundRequest(
+        db,
+        purchase,
+        base.user,
+        new Date("2026-03-02T10:00:00")
+      )
+    ).toEqual({ eligible: false, reason: "refund-request-exists" });
+  });
+
+  it("refuses when the purchase's Refund Request was Approved", () => {
+    const purchase = buyCourse("2026-03-01T10:00:00");
+    addRefundRequest(purchase.id, schema.RefundStatus.Approved);
+
+    expect(
+      canOpenRefundRequest(
+        db,
+        purchase,
+        base.user,
+        new Date("2026-03-02T10:00:00")
+      )
+    ).toEqual({ eligible: false, reason: "refund-request-exists" });
+  });
+
+  // A refunded learner who buys again gets a fresh purchase, judged on its
+  // own Refund Request rather than the earlier one.
+  it("lets a refunded learner's later purchase of the same course be eligible", () => {
+    const refunded = buyCourse("2026-03-01T10:00:00");
+    addRefundRequest(refunded.id, schema.RefundStatus.Approved);
+    const rebought = buyCourse("2026-03-20T10:00:00");
+
+    expect(
+      canOpenRefundRequest(
+        db,
+        rebought,
+        base.user,
+        new Date("2026-03-21T10:00:00")
+      )
+    ).toEqual({ eligible: true });
   });
 
   it("refuses before the day of purchase", () => {
@@ -324,5 +375,31 @@ describe("canOpenRefundRequest", () => {
       eligible: false,
       reason: "outside-refund-window",
     });
+  });
+});
+
+// ─── Refund Request lookup ───
+
+describe("getRefundRequest", () => {
+  // The course page badge needs the request whatever its status.
+  it("finds a purchase's resolved Refund Request", () => {
+    const purchase = buyCourse("2026-03-01T10:00:00");
+    db.insert(schema.refunds)
+      .values({
+        purchaseId: purchase.id,
+        status: schema.RefundStatus.Declined,
+        reason: "Not what I expected",
+      })
+      .run();
+
+    expect(getRefundRequest(db, purchase.id)?.status).toBe(
+      schema.RefundStatus.Declined
+    );
+  });
+
+  it("finds nothing on a purchase without a Refund Request", () => {
+    const purchase = buyCourse("2026-03-01T10:00:00");
+
+    expect(getRefundRequest(db, purchase.id)).toBeUndefined();
   });
 });
