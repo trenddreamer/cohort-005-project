@@ -3,6 +3,7 @@ import { eq } from "drizzle-orm";
 import { createTestDb, seedBaseData } from "~/test/setup";
 import * as schema from "~/db/schema";
 import {
+  approveRefundRequest,
   canOpenRefundRequest,
   declineRefundRequest,
   getCompletionFraction,
@@ -700,4 +701,173 @@ describe("declineRefundRequest", () => {
       resolvedAt: null,
     });
   });
+});
+
+// ─── Approving a Refund Request ───
+
+describe("approveRefundRequest", () => {
+  const now = new Date("2026-03-05T15:30:00.000Z");
+
+  function addAdmin() {
+    return db
+      .insert(schema.users)
+      .values({
+        name: "Test Admin",
+        email: "admin@example.com",
+        role: schema.UserRole.Admin,
+      })
+      .returning()
+      .get();
+  }
+
+  // A solo purchase: the learner bought it and was enrolled by it.
+  function openSoloRefundRequest(status = schema.RefundStatus.Requested) {
+    const purchase = buyCourse("2026-03-01T10:00:00");
+    db.insert(schema.enrollments)
+      .values({ userId: base.user.id, courseId: base.course.id })
+      .run();
+    return db
+      .insert(schema.refunds)
+      .values({ purchaseId: purchase.id, reason: "Not for me", status })
+      .returning()
+      .get();
+  }
+
+  function findRefundRequest(id: number) {
+    return db
+      .select()
+      .from(schema.refunds)
+      .where(eq(schema.refunds.id, id))
+      .get();
+  }
+
+  it("marks an Open Refund Request Approved, recording who approved it, when, and the Amount Refunded", () => {
+    const admin = addAdmin();
+    const request = openSoloRefundRequest();
+
+    expect(approveRefundRequest(db, request.id, admin.id, now)).toEqual({
+      ok: true,
+    });
+    expect(findRefundRequest(request.id)).toMatchObject({
+      status: schema.RefundStatus.Approved,
+      resolvedByUserId: admin.id,
+      resolvedAt: "2026-03-05T15:30:00.000Z",
+      amountRefunded: 4900,
+    });
+  });
+
+  function enrollmentsOf(userId: number) {
+    return db
+      .select({ courseId: schema.enrollments.courseId })
+      .from(schema.enrollments)
+      .where(eq(schema.enrollments.userId, userId))
+      .all();
+  }
+
+  // ADR 0001: access is "an enrollment row exists", so Approve deletes it.
+  // Progress is keyed by user and lesson, so it survives for a re-buy.
+  it("removes the learner's enrollment for the course and keeps their progress", () => {
+    const admin = addAdmin();
+    const [lesson] = addLessons(1);
+    const otherCourse = addOtherCourse();
+    const request = openSoloRefundRequest();
+    db.insert(schema.enrollments)
+      .values([
+        { userId: base.user.id, courseId: otherCourse.id },
+        { userId: base.instructor.id, courseId: base.course.id },
+      ])
+      .run();
+    complete(lesson.id);
+    watch(lesson.id, 600);
+    const progressBefore = db.select().from(schema.lessonProgress).all();
+    const watchEventsBefore = db.select().from(schema.videoWatchEvents).all();
+
+    expect(approveRefundRequest(db, request.id, admin.id, now)).toEqual({
+      ok: true,
+    });
+    expect(enrollmentsOf(base.user.id)).toEqual([{ courseId: otherCourse.id }]);
+    expect(enrollmentsOf(base.instructor.id)).toEqual([
+      { courseId: base.course.id },
+    ]);
+    expect(db.select().from(schema.lessonProgress).all()).toEqual(
+      progressBefore
+    );
+    expect(db.select().from(schema.videoWatchEvents).all()).toEqual(
+      watchEventsBefore
+    );
+    expect(progressBefore).toHaveLength(1);
+    expect(watchEventsBefore).toHaveLength(1);
+  });
+
+  // The learner gets back what they paid, even if the price has moved since.
+  it("records Amount Refunded as the amount paid, not the course's current list price", () => {
+    const admin = addAdmin();
+    const request = openSoloRefundRequest();
+    db.update(schema.courses)
+      .set({ price: 9900 })
+      .where(eq(schema.courses.id, base.course.id))
+      .run();
+
+    approveRefundRequest(db, request.id, admin.id, now);
+
+    expect(findRefundRequest(request.id)?.amountRefunded).toBe(4900);
+  });
+
+  it("reports a Refund Request that doesn't exist", () => {
+    const admin = addAdmin();
+
+    expect(approveRefundRequest(db, 999, admin.id, now)).toEqual({
+      ok: false,
+      error: "not-found",
+    });
+  });
+
+  // A resolution is final: a Declined request never becomes Approved, and the
+  // learner keeps the access Decline left them.
+  it.each([
+    ["Declined", schema.RefundStatus.Declined],
+    ["already Approved", schema.RefundStatus.Approved],
+  ])("refuses a request that is %s, changing nothing", (_, status) => {
+    const admin = addAdmin();
+    const request = openSoloRefundRequest(status);
+
+    expect(approveRefundRequest(db, request.id, admin.id, now)).toEqual({
+      ok: false,
+      error: "already-resolved",
+    });
+    expect(findRefundRequest(request.id)).toMatchObject({
+      status,
+      resolvedByUserId: null,
+      resolvedAt: null,
+      amountRefunded: null,
+    });
+    expect(enrollmentsOf(base.user.id)).toEqual([{ courseId: base.course.id }]);
+  });
+
+  // Only an admin resolves a Refund Request.
+  it.each([
+    ["an instructor", () => base.instructor.id],
+    ["a student", () => base.user.id],
+  ])(
+    "refuses %s, leaving the request Open and access in place",
+    (_, actingUserId) => {
+      const request = openSoloRefundRequest();
+
+      expect(approveRefundRequest(db, request.id, actingUserId(), now)).toEqual(
+        {
+          ok: false,
+          error: "not-an-admin",
+        }
+      );
+      expect(findRefundRequest(request.id)).toMatchObject({
+        status: schema.RefundStatus.Requested,
+        resolvedByUserId: null,
+        resolvedAt: null,
+        amountRefunded: null,
+      });
+      expect(enrollmentsOf(base.user.id)).toEqual([
+        { courseId: base.course.id },
+      ]);
+    }
+  );
 });

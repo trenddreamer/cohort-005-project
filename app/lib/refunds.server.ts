@@ -293,18 +293,75 @@ export type ResolveRefundRequestResult =
   | { ok: true }
   | { ok: false; error: ResolveRefundRequestError };
 
+/** A transaction inside `RefundsDb.transaction`. */
+type RefundsTx = Parameters<Parameters<RefundsDb["transaction"]>[0]>[0];
+
+/**
+ * Removes access from everyone who got it through the purchase by deleting
+ * their enrollments for the course (ADR 0001). Lesson progress and watch
+ * events are keyed by user and lesson, so they stay.
+ *
+ * A solo purchase enrolled its buyer. A team purchase (#8) enrolled whoever
+ * claimed its seats, not its buyer, and its unclaimed seats must stop working:
+ * that branch belongs here.
+ */
+function revokeAccessFromPurchase(
+  tx: RefundsTx,
+  purchase: { userId: number; courseId: number }
+) {
+  tx.delete(schema.enrollments)
+    .where(
+      and(
+        eq(schema.enrollments.userId, purchase.userId),
+        eq(schema.enrollments.courseId, purchase.courseId)
+      )
+    )
+    .run();
+}
+
+// Runs after the request has moved from Open to Approved, in that transaction.
+function recordApproval(tx: RefundsTx, refundRequestId: number) {
+  const purchase = tx
+    .select({
+      userId: schema.purchases.userId,
+      courseId: schema.purchases.courseId,
+      amountPaid: schema.purchases.amountPaid,
+    })
+    .from(schema.refunds)
+    .innerJoin(
+      schema.purchases,
+      eq(schema.refunds.purchaseId, schema.purchases.id)
+    )
+    .where(eq(schema.refunds.id, refundRequestId))
+    .get();
+  // The refunds -> purchases foreign key means this can't happen; throwing
+  // rolls the transaction back rather than approving half-way.
+  if (!purchase) {
+    throw new Error(`Refund request ${refundRequestId} has no purchase.`);
+  }
+
+  // Amount Refunded is always the full Refundable Amount: what the learner
+  // paid, never the course's current list price. There are no partial refunds.
+  tx.update(schema.refunds)
+    .set({ amountRefunded: purchase.amountPaid })
+    .where(eq(schema.refunds.id, refundRequestId))
+    .run();
+
+  revokeAccessFromPurchase(tx, purchase);
+}
+
 /**
  * Resolves an Open Refund Request in one transaction, behind the guards that
  * Approve and Decline share: only an admin resolves, and only an Open request
- * can be resolved. Approve widens `resolution` (Amount Refunded) and does its
- * access changes in the same transaction once the status change has applied.
+ * can be resolved. Approving also records the Amount Refunded and removes
+ * access in the same transaction, so a failure leaves the request Open.
  */
 function resolveRefundRequest(
   db: RefundsDb,
   refundRequestId: number,
   actingUserId: number,
   now: Date,
-  resolution: { status: schema.RefundStatus.Declined }
+  status: schema.RefundStatus.Approved | schema.RefundStatus.Declined
 ): ResolveRefundRequestResult {
   return db.transaction((tx) => {
     const actingUser = tx
@@ -321,7 +378,7 @@ function resolveRefundRequest(
     const { changes } = tx
       .update(schema.refunds)
       .set({
-        status: resolution.status,
+        status,
         resolvedByUserId: actingUserId,
         resolvedAt: now.toISOString(),
       })
@@ -341,6 +398,10 @@ function resolveRefundRequest(
       return { ok: false, error: exists ? "already-resolved" : "not-found" };
     }
 
+    if (status === schema.RefundStatus.Approved) {
+      recordApproval(tx, refundRequestId);
+    }
+
     return { ok: true };
   });
 }
@@ -355,7 +416,33 @@ export function declineRefundRequest(
   actingUserId: number,
   now: Date
 ): ResolveRefundRequestResult {
-  return resolveRefundRequest(db, refundRequestId, actingUserId, now, {
-    status: schema.RefundStatus.Declined,
-  });
+  return resolveRefundRequest(
+    db,
+    refundRequestId,
+    actingUserId,
+    now,
+    schema.RefundStatus.Declined
+  );
+}
+
+/**
+ * Approves an Open Refund Request, recording a Refund the admin has already
+ * issued by hand (the app never moves money). Amount Refunded is what the
+ * learner paid, and everyone who got access through the purchase loses it.
+ * Lesson progress and watch events are kept, so a learner who buys the course
+ * again carries on where they left off.
+ */
+export function approveRefundRequest(
+  db: RefundsDb,
+  refundRequestId: number,
+  actingUserId: number,
+  now: Date
+): ResolveRefundRequestResult {
+  return resolveRefundRequest(
+    db,
+    refundRequestId,
+    actingUserId,
+    now,
+    schema.RefundStatus.Approved
+  );
 }
