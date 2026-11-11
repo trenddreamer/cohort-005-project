@@ -6,6 +6,7 @@ import {
   getCompletionFraction,
   getRefundRequest,
   getWatchedSeconds,
+  listRefundRequests,
 } from "./refunds.server";
 
 type TestDb = ReturnType<typeof createTestDb>;
@@ -401,5 +402,137 @@ describe("getRefundRequest", () => {
     const purchase = buyCourse("2026-03-01T10:00:00");
 
     expect(getRefundRequest(db, purchase.id)).toBeUndefined();
+  });
+});
+
+// ─── Listing Refund Requests ───
+
+describe("listRefundRequests", () => {
+  function requestRefund(
+    purchaseId: number,
+    requestedAt: string,
+    status = schema.RefundStatus.Requested
+  ) {
+    return db
+      .insert(schema.refunds)
+      .values({ purchaseId, reason: "Not what I expected", requestedAt, status })
+      .returning()
+      .get();
+  }
+
+  it("lists an Open Refund Request with the learner, course, reason and Refundable Amount", () => {
+    const purchase = buyCourse("2026-03-01T10:00:00");
+    const request = requestRefund(purchase.id, "2026-03-02T09:00:00");
+
+    expect(
+      listRefundRequests(db, schema.RefundStatus.Requested)
+    ).toMatchObject([
+      {
+        id: request.id,
+        purchaseId: purchase.id,
+        learner: { id: base.user.id, name: "Test User", email: "test@example.com" },
+        course: { id: base.course.id, title: "Test Course" },
+        reason: "Not what I expected",
+        requestedAt: "2026-03-02T09:00:00",
+        refundableAmount: 4900,
+      },
+    ]);
+  });
+
+  // The learner who has waited longest is first in line.
+  it("lists only Open requests, oldest first", () => {
+    const newest = requestRefund(
+      buyCourse("2026-03-01T10:00:00").id,
+      "2026-03-05T09:00:00"
+    );
+    const oldest = requestRefund(
+      buyCourse("2026-03-01T11:00:00").id,
+      "2026-03-02T09:00:00"
+    );
+    requestRefund(
+      buyCourse("2026-03-01T12:00:00").id,
+      "2026-03-01T09:00:00",
+      schema.RefundStatus.Declined
+    );
+    requestRefund(
+      buyCourse("2026-03-01T13:00:00").id,
+      "2026-03-01T08:00:00",
+      schema.RefundStatus.Approved
+    );
+
+    expect(
+      listRefundRequests(db, schema.RefundStatus.Requested).map((r) => r.id)
+    ).toEqual([oldest.id, newest.id]);
+  });
+
+  // The admin refunds by hand exactly what the list says, so it must be what
+  // the learner paid, not whatever the course costs today.
+  it("shows the amount paid as the Refundable Amount after the list price changes", () => {
+    db.update(schema.courses).set({ price: 4900 }).run();
+    const purchase = buyCourse("2026-03-01T10:00:00");
+    requestRefund(purchase.id, "2026-03-02T09:00:00");
+    db.update(schema.courses).set({ price: 9900 }).run();
+
+    const [item] = listRefundRequests(db, schema.RefundStatus.Requested);
+    expect(item.refundableAmount).toBe(4900);
+  });
+
+  // ─── Usage and limit warnings ───
+
+  it("shows the learner's current watched time and completion, under the limits", () => {
+    const [a, b] = addLessons(4);
+    watch(a.id, 1800);
+    watch(b.id, 1800);
+    complete(a.id);
+    requestRefund(buyCourse("2026-03-01T10:00:00").id, "2026-03-02T09:00:00");
+
+    expect(
+      listRefundRequests(db, schema.RefundStatus.Requested)[0]
+    ).toMatchObject({
+      watchedSeconds: 3600,
+      completionFraction: 0.25,
+      isOverWatchLimit: false,
+      isOverCompletionLimit: false,
+    });
+  });
+
+  // Exactly at a limit counts as over it, matching eligibility.
+  it("flags watched time and completion at the Watch Limit and Completion Limit", () => {
+    const [a, b] = addLessons(2);
+    watch(a.id, 3600);
+    watch(b.id, 3600);
+    complete(a.id);
+    requestRefund(buyCourse("2026-03-01T10:00:00").id, "2026-03-02T09:00:00");
+
+    expect(
+      listRefundRequests(db, schema.RefundStatus.Requested)[0]
+    ).toMatchObject({
+      watchedSeconds: 7200,
+      completionFraction: 0.5,
+      isOverWatchLimit: true,
+      isOverCompletionLimit: true,
+    });
+  });
+
+  // Usage is per learner and per course: another learner's progress, or the
+  // same learner's progress on another course, doesn't count.
+  it("counts only the requesting learner's usage of the purchased course", () => {
+    const [lesson] = addLessons(1);
+    const otherCourse = addOtherCourse();
+    const [otherLesson] = addLessons(1, otherCourse.id);
+    watch(lesson.id, 7200, base.instructor.id);
+    complete(lesson.id, base.instructor.id);
+    watch(otherLesson.id, 7200);
+    complete(otherLesson.id);
+    requestRefund(buyCourse("2026-03-01T10:00:00").id, "2026-03-02T09:00:00");
+
+    expect(
+      listRefundRequests(db, schema.RefundStatus.Requested)[0]
+    ).toMatchObject({
+      watchedSeconds: 0,
+      completionFraction: 0,
+      isOverWatchLimit: false,
+      isOverCompletionLimit: false,
+    });
   });
 });
