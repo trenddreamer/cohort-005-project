@@ -15,11 +15,13 @@ import {
   lessonProgress,
   courseRatings,
   LessonProgressStatus,
+  RefundStatus,
 } from "~/db/schema";
 import { eq, and, or, sql } from "drizzle-orm";
 import {
   canOpenRefundRequest,
   getLatestPurchase,
+  getRefundRequest,
   lastDayOfRefundWindow,
 } from "~/lib/refunds.server";
 import { Card, CardContent, CardHeader } from "~/components/ui/card";
@@ -395,6 +397,22 @@ function getRefundOffer(
   return { amount, lastDayInWindow: lastDayOfRefundWindow(purchase) };
 }
 
+/**
+ * The status of the Refund Request on the learner's latest purchase, or null
+ * if that purchase has none. A later purchase starts with no Refund Request.
+ */
+function getRefundRequestStatus(userId: number, courseId: number) {
+  const purchase = getLatestPurchase(db, userId, courseId);
+  if (!purchase) return null;
+  return getRefundRequest(db, purchase.id)?.status ?? null;
+}
+
+const refundBadges: Record<RefundStatus, string> = {
+  [RefundStatus.Requested]: "Refund requested",
+  [RefundStatus.Approved]: "Refund approved",
+  [RefundStatus.Declined]: "Refund declined",
+};
+
 const ratingSchema = z.object({
   rating: z.coerce.number().int().min(MIN_RATING).max(MAX_RATING),
 });
@@ -427,13 +445,17 @@ export async function loader({ params, request }: Route.LoaderArgs) {
   let progress = 0;
   let lessonProgressMap: Record<number, string> = {};
   let nextLessonId: number | null = null;
-  let cancellation: { amount: number; lastDayInWindow: string } | null = null;
+  let refundOffer: { amount: number; lastDayInWindow: string } | null = null;
+  let refundRequestStatus: RefundStatus | null = null;
 
   if (currentUserId) {
     enrolled = isUserEnrolled(currentUserId, course.id);
+    // Looked up whether or not the learner is enrolled: an Approved refund
+    // removes the enrollment, and the learner still needs to see the outcome.
+    refundRequestStatus = getRefundRequestStatus(currentUserId, course.id);
 
     if (enrolled) {
-      cancellation = getRefundOffer(currentUserId, {
+      refundOffer = getRefundOffer(currentUserId, {
         id: course.id,
         price: courseWithDetails.price,
       });
@@ -480,7 +502,8 @@ export async function loader({ params, request }: Route.LoaderArgs) {
     tierInfo,
     ratingSummary,
     userRating,
-    cancellation,
+    refundOffer,
+    refundBadge: refundRequestStatus ? refundBadges[refundRequestStatus] : null,
   };
 }
 
@@ -581,7 +604,8 @@ export default function CourseDetail({ loaderData }: Route.ComponentProps) {
     tierInfo,
     ratingSummary,
     userRating,
-    cancellation,
+    refundOffer,
+    refundBadge,
   } = loaderData;
   const isInstructor = currentUserId === course.instructorId;
   const [searchParams, setSearchParams] = useSearchParams();
@@ -775,6 +799,11 @@ export default function CourseDetail({ loaderData }: Route.ComponentProps) {
               </h2>
             </CardHeader>
             <CardContent className="space-y-4">
+              {refundBadge && !isInstructor && (
+                <span className="inline-flex items-center rounded-full border bg-muted px-2.5 py-0.5 text-xs font-medium">
+                  {refundBadge}
+                </span>
+              )}
               {isInstructor ? (
                 <Link to={`/instructor/${course.id}`}>
                   <Button className="w-full">
@@ -817,10 +846,10 @@ export default function CourseDetail({ loaderData }: Route.ComponentProps) {
                     </Button>
                   </Link>
                   <RateCourse userRating={userRating} />
-                  {cancellation && (
-                    <CancelPurchase
+                  {refundOffer && !refundBadge && (
+                    <RequestRefund
                       slug={course.slug}
-                      amount={cancellation.amount}
+                      amount={refundOffer.amount}
                     />
                   )}
                 </>
@@ -894,7 +923,7 @@ function RateCourse({ userRating }: { userRating: number | null }) {
   );
 }
 
-function CancelPurchase({ slug, amount }: { slug: string; amount: number }) {
+function RequestRefund({ slug, amount }: { slug: string; amount: number }) {
   const fetcher = useFetcher<{ errors?: Record<string, string> }>();
   const [isFormOpen, setIsFormOpen] = useState(false);
   const isSubmitting = fetcher.state !== "idle";
@@ -915,7 +944,7 @@ function CancelPurchase({ slug, amount }: { slug: string; amount: number }) {
           className="w-full text-muted-foreground"
           onClick={() => setIsFormOpen(true)}
         >
-          Cancel my purchase
+          Request a refund
         </Button>
       </div>
     );
@@ -923,7 +952,7 @@ function CancelPurchase({ slug, amount }: { slug: string; amount: number }) {
 
   return (
     <div className="border-t pt-4">
-      <p className="mb-2 text-sm font-medium">Cancel my purchase</p>
+      <p className="mb-2 text-sm font-medium">Request a refund</p>
       <p className="mb-3 text-xs text-muted-foreground">
         We will send {formatPrice(amount)} back to the card you paid with, once
         someone has read your note.
@@ -941,7 +970,7 @@ function CancelPurchase({ slug, amount }: { slug: string; amount: number }) {
         />
         <div className="flex gap-2">
           <Button type="submit" size="sm" disabled={isSubmitting}>
-            {isSubmitting ? "Sending..." : "Cancel my purchase"}
+            {isSubmitting ? "Sending..." : "Request a refund"}
           </Button>
           <Button
             type="button"
@@ -949,7 +978,7 @@ function CancelPurchase({ slug, amount }: { slug: string; amount: number }) {
             size="sm"
             onClick={() => setIsFormOpen(false)}
           >
-            Keep it
+            Cancel
           </Button>
         </div>
       </fetcher.Form>
