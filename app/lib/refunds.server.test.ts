@@ -11,6 +11,7 @@ import {
   getWatchedSeconds,
   listRefundRequests,
 } from "./refunds.server";
+import { getSeatCode, redeemSeatCode } from "./seat-codes.server";
 
 type TestDb = ReturnType<typeof createTestDb>;
 
@@ -70,6 +71,60 @@ function watch(
 ) {
   db.insert(schema.videoWatchEvents)
     .values({ userId, lessonId, eventType: "progress", positionSeconds })
+    .run();
+}
+
+// ─── Team purchases ───
+
+function addMember(name: string) {
+  return db
+    .insert(schema.users)
+    .values({
+      name,
+      email: `${name.toLowerCase()}@example.com`,
+      role: schema.UserRole.Student,
+    })
+    .returning()
+    .get();
+}
+
+// A team purchase: the buyer gets seat codes, not an enrollment. Under the
+// eligibility rules its Refund Request was opened while no seat was claimed.
+function openTeamRefundRequest(seatCount: number) {
+  const purchase = buyCourse("2026-03-01T10:00:00");
+  const team = db.insert(schema.teams).values({}).returning().get();
+  const codes = Array.from({ length: seatCount }, (_, i) => {
+    const code = `SEAT-${i + 1}`;
+    db.insert(schema.coupons)
+      .values({
+        teamId: team.id,
+        courseId: base.course.id,
+        code,
+        purchaseId: purchase.id,
+      })
+      .run();
+    return code;
+  });
+  const request = db
+    .insert(schema.refunds)
+    .values({
+      purchaseId: purchase.id,
+      reason: "Team changed plans",
+      requestedAt: "2026-03-02T09:00:00.000Z",
+    })
+    .returning()
+    .get();
+  return { purchase, request, codes };
+}
+
+// A member claims a seat (as the redeem page does) while the request is Open.
+function claimSeat(code: string, userId: number, claimedAt: string) {
+  db.update(schema.coupons)
+    .set({ redeemedByUserId: userId, redeemedAt: claimedAt })
+    .where(eq(schema.coupons.code, code))
+    .run();
+  db.insert(schema.enrollments)
+    .values({ userId, courseId: base.course.id })
     .run();
 }
 
@@ -441,6 +496,42 @@ describe("listRefundRequests", () => {
         refundableAmount: 4900,
       },
     ]);
+  });
+
+  it("marks a solo purchase as not a team purchase, with no seats", () => {
+    requestRefund(buyCourse("2026-03-01T10:00:00").id, "2026-03-02T09:00:00");
+
+    expect(listRefundRequests(db, schema.RefundStatus.Requested)).toMatchObject(
+      [
+        {
+          isTeamPurchase: false,
+          seatCount: 0,
+          claimedSeatCount: 0,
+          claimedSeatsSinceRequested: 0,
+        },
+      ]
+    );
+  });
+
+  // The admin sees who loses access on approval: seats claimed while the
+  // request was Open are counted separately for the confirmation warning.
+  it("shows a team purchase's seat count, Claimed Seats, and seats claimed since the request was opened", () => {
+    const { codes } = openTeamRefundRequest(4);
+    claimSeat(codes[0], addMember("Early").id, "2026-03-01T12:00:00.000Z");
+    claimSeat(codes[1], addMember("Olivia").id, "2026-03-03T10:00:00.000Z");
+    claimSeat(codes[2], addMember("Liam").id, "2026-03-04T10:00:00.000Z");
+
+    expect(listRefundRequests(db, schema.RefundStatus.Requested)).toMatchObject(
+      [
+        {
+          refundableAmount: 4900,
+          isTeamPurchase: true,
+          seatCount: 4,
+          claimedSeatCount: 3,
+          claimedSeatsSinceRequested: 2,
+        },
+      ]
+    );
   });
 
   // The learner who has waited longest is first in line.
@@ -842,6 +933,51 @@ describe("approveRefundRequest", () => {
       amountRefunded: null,
     });
     expect(enrollmentsOf(base.user.id)).toEqual([{ courseId: base.course.id }]);
+  });
+
+  it("removes every member's enrollment from a team purchase whose seats were claimed while the request was Open, keeping their progress", () => {
+    const admin = addAdmin();
+    const [lesson] = addLessons(1);
+    const otherCourse = addOtherCourse();
+    const olivia = addMember("Olivia");
+    const liam = addMember("Liam");
+    const { request, codes } = openTeamRefundRequest(3);
+    claimSeat(codes[0], olivia.id, "2026-03-03T10:00:00.000Z");
+    claimSeat(codes[1], liam.id, "2026-03-04T10:00:00.000Z");
+    db.insert(schema.enrollments)
+      .values({ userId: olivia.id, courseId: otherCourse.id })
+      .run();
+    complete(lesson.id, olivia.id);
+    watch(lesson.id, 600, liam.id);
+
+    expect(approveRefundRequest(db, request.id, admin.id, now)).toEqual({
+      ok: true,
+    });
+    expect(enrollmentsOf(olivia.id)).toEqual([{ courseId: otherCourse.id }]);
+    expect(enrollmentsOf(liam.id)).toEqual([]);
+    expect(db.select().from(schema.lessonProgress).all()).toHaveLength(1);
+    expect(db.select().from(schema.videoWatchEvents).all()).toHaveLength(1);
+    expect(findRefundRequest(request.id)?.amountRefunded).toBe(4900);
+  });
+
+  it("stops a team purchase's unclaimed seat codes from being claimed", () => {
+    const admin = addAdmin();
+    const olivia = addMember("Olivia");
+    const liam = addMember("Liam");
+    const { request, codes } = openTeamRefundRequest(3);
+    claimSeat(codes[0], olivia.id, "2026-03-03T10:00:00.000Z");
+
+    approveRefundRequest(db, request.id, admin.id, now);
+
+    expect(redeemSeatCode(db, codes[1], liam.id, "", now)).toEqual({
+      ok: false,
+      error: "This seat code no longer works: its purchase was refunded",
+    });
+    expect(enrollmentsOf(liam.id)).toEqual([]);
+    expect(getSeatCode(db, codes[1])).toMatchObject({
+      redeemedByUserId: null,
+      redeemedAt: null,
+    });
   });
 
   // Only an admin resolves a Refund Request.

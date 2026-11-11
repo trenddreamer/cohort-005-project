@@ -9,7 +9,7 @@ import {
 import { eq } from "drizzle-orm";
 import { toast } from "sonner";
 import { z } from "zod";
-import { AlertTriangle, ReceiptText } from "lucide-react";
+import { AlertTriangle, ReceiptText, Users } from "lucide-react";
 import type { Route } from "./+types/admin.refunds";
 import { db } from "~/db";
 import { RefundStatus, UserRole, users } from "~/db/schema";
@@ -228,6 +228,47 @@ function UsageCell({
   );
 }
 
+function pluralizeSeats(count: number) {
+  return `${count} ${count === 1 ? "seat" : "seats"}`;
+}
+
+function TeamPurchaseSeats({ request }: { request: RefundRequestListItem }) {
+  return (
+    <div className="mt-1 inline-flex items-center gap-1 text-xs text-muted-foreground">
+      <Users className="size-3.5" />
+      <span>
+        Team purchase · {pluralizeSeats(request.seatCount)},{" "}
+        {request.claimedSeatCount} claimed
+      </span>
+    </div>
+  );
+}
+
+// Who loses access when a team purchase's refund is approved.
+function TeamApprovalWarning({ request }: { request: RefundRequestListItem }) {
+  const claimedSinceRequested = request.claimedSeatsSinceRequested;
+  return (
+    <>
+      <p>
+        This is a team purchase of {pluralizeSeats(request.seatCount)}. Every
+        member who claimed a seat loses access to{" "}
+        <em>{request.course.title}</em>, and the unclaimed seat codes stop
+        working.
+      </p>
+      {claimedSinceRequested > 0 && (
+        <p className="flex items-start gap-2 rounded-md bg-amber-50 p-3 font-medium text-amber-700 dark:bg-amber-900/20 dark:text-amber-400">
+          <AlertTriangle className="mt-0.5 size-4 shrink-0" />
+          <span>
+            {pluralizeSeats(claimedSinceRequested)}{" "}
+            {claimedSinceRequested === 1 ? "was" : "were"} claimed after the
+            refund was requested. Those members lose access too.
+          </span>
+        </p>
+      )}
+    </>
+  );
+}
+
 function ResolveActions({ request }: { request: RefundRequestListItem }) {
   const fetcher = useFetcher<typeof action>();
 
@@ -251,7 +292,6 @@ function ResolveActions({ request }: { request: RefundRequestListItem }) {
 
   return (
     <div className="flex justify-end gap-2">
-      {/* Team purchases (#8) add their seat counts and a warning here. */}
       <ConfirmDialog
         trigger={
           <Button size="sm" disabled={isSubmitting}>
@@ -266,9 +306,18 @@ function ResolveActions({ request }: { request: RefundRequestListItem }) {
               <strong className="text-foreground">
                 {formatPrice(request.refundableAmount)}
               </strong>{" "}
-              to the learner. Approving removes their access to{" "}
-              <em>{request.course.title}</em> now.
+              {request.isTeamPurchase ? (
+                <>to the learner.</>
+              ) : (
+                <>
+                  to the learner. Approving removes their access to{" "}
+                  <em>{request.course.title}</em> now.
+                </>
+              )}
             </p>
+            {request.isTeamPurchase && (
+              <TeamApprovalWarning request={request} />
+            )}
             <p>
               Their progress is kept if they buy the course again. A resolved
               refund request is final.
@@ -311,7 +360,10 @@ function RefundRequestRow({ request }: { request: RefundRequestListItem }) {
           {request.learner.email}
         </div>
       </td>
-      <td className="px-4 py-3 text-sm">{request.course.title}</td>
+      <td className="px-4 py-3 text-sm">
+        <div>{request.course.title}</div>
+        {request.isTeamPurchase && <TeamPurchaseSeats request={request} />}
+      </td>
       <td className="px-4 py-3 text-sm whitespace-nowrap text-muted-foreground">
         {formatDate(request.requestedAt)}
       </td>
@@ -351,7 +403,10 @@ function ResolvedRefundRequestRow({
           {request.learner.email}
         </div>
       </td>
-      <td className="px-4 py-3 text-sm">{request.course.title}</td>
+      <td className="px-4 py-3 text-sm">
+        <div>{request.course.title}</div>
+        {request.isTeamPurchase && <TeamPurchaseSeats request={request} />}
+      </td>
       <td className="px-4 py-3 text-sm whitespace-nowrap text-muted-foreground">
         {formatDate(request.requestedAt)}
       </td>

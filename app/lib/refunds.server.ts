@@ -170,6 +170,18 @@ function hasClaimedSeat(db: RefundsDb, purchaseId: number): boolean {
   return claimedSeat !== undefined;
 }
 
+/** A purchase's team seat codes. A purchase with any is a team purchase. */
+function getSeatCodes(db: RefundsDb | RefundsTx, purchaseId: number) {
+  return db
+    .select({
+      redeemedByUserId: schema.coupons.redeemedByUserId,
+      redeemedAt: schema.coupons.redeemedAt,
+    })
+    .from(schema.coupons)
+    .where(eq(schema.coupons.purchaseId, purchaseId))
+    .all();
+}
+
 // ─── Eligibility ───
 
 /**
@@ -192,8 +204,7 @@ export function canOpenRefundRequest(
     return { eligible: false, reason: "outside-refund-window" };
   }
   if (
-    getCompletionFraction(db, user.id, purchase.courseId) >=
-    COMPLETION_LIMIT
+    getCompletionFraction(db, user.id, purchase.courseId) >= COMPLETION_LIMIT
   ) {
     return { eligible: false, reason: "completion-limit-reached" };
   }
@@ -226,6 +237,14 @@ export type RefundRequestListItem = {
   isOverWatchLimit: boolean;
   /** At or over the Completion Limit. A warning for the admin, not a rule. */
   isOverCompletionLimit: boolean;
+  /** Bought as seat codes for a team, rather than by the learner for themselves. */
+  isTeamPurchase: boolean;
+  /** Seats the team purchase bought. Zero for a solo purchase. */
+  seatCount: number;
+  /** Seats a member has claimed. Approving removes each one's access. */
+  claimedSeatCount: number;
+  /** Claimed Seats taken after the request was opened, while it was Open. */
+  claimedSeatsSinceRequested: number;
   /** The admin who resolved it. Null while Open. */
   resolvedBy: { id: number; name: string } | null;
   /** When it was resolved. Null while Open. */
@@ -290,12 +309,23 @@ export function listRefundRequests(
       request.learner.id,
       request.course.id
     );
+    const seatCodes = getSeatCodes(db, request.purchaseId);
+    const seatCount = seatCodes.length;
+    const claimedSeats = seatCodes.flatMap((seat) =>
+      seat.redeemedAt === null ? [] : [seat.redeemedAt]
+    );
     return {
       ...request,
       watchedSeconds,
       completionFraction,
       isOverWatchLimit: watchedSeconds >= MAX_WATCHED_SECONDS,
       isOverCompletionLimit: completionFraction >= COMPLETION_LIMIT,
+      isTeamPurchase: seatCount > 0,
+      seatCount,
+      claimedSeatCount: claimedSeats.length,
+      claimedSeatsSinceRequested: claimedSeats.filter(
+        (claimedAt) => claimedAt >= request.requestedAt
+      ).length,
     };
   });
 }
@@ -303,13 +333,10 @@ export function listRefundRequests(
 // ─── Resolving Refund Requests ───
 
 export type ResolveRefundRequestError =
-  | "not-an-admin"
-  | "not-found"
-  | "already-resolved";
+  "not-an-admin" | "not-found" | "already-resolved";
 
 export type ResolveRefundRequestResult =
-  | { ok: true }
-  | { ok: false; error: ResolveRefundRequestError };
+  { ok: true } | { ok: false; error: ResolveRefundRequestError };
 
 /** A transaction inside `RefundsDb.transaction`. */
 type RefundsTx = Parameters<Parameters<RefundsDb["transaction"]>[0]>[0];
@@ -319,18 +346,35 @@ type RefundsTx = Parameters<Parameters<RefundsDb["transaction"]>[0]>[0];
  * their enrollments for the course (ADR 0001). Lesson progress and watch
  * events are keyed by user and lesson, so they stay.
  *
- * A solo purchase enrolled its buyer. A team purchase (#8) enrolled whoever
- * claimed its seats, not its buyer, and its unclaimed seats must stop working:
- * that branch belongs here.
+ * A solo purchase enrolled its buyer. A team purchase (one with seat codes)
+ * enrolled whoever claimed its seats, not its buyer.
  */
 function revokeAccessFromPurchase(
   tx: RefundsTx,
-  purchase: { userId: number; courseId: number }
+  purchase: { id: number; userId: number; courseId: number },
+  now: Date
 ) {
+  const seatCodes = getSeatCodes(tx, purchase.id);
+  const isTeamPurchase = seatCodes.length > 0;
+  const userIdsWithAccess = isTeamPurchase
+    ? seatCodes.flatMap((seat) =>
+        seat.redeemedByUserId === null ? [] : [seat.redeemedByUserId]
+      )
+    : [purchase.userId];
+  if (isTeamPurchase) {
+    // Every seat code on the purchase stops counting as a seat, and the
+    // unclaimed ones can no longer be claimed.
+    tx.update(schema.coupons)
+      .set({ voidedAt: now.toISOString() })
+      .where(eq(schema.coupons.purchaseId, purchase.id))
+      .run();
+  }
+  if (userIdsWithAccess.length === 0) return;
+
   tx.delete(schema.enrollments)
     .where(
       and(
-        eq(schema.enrollments.userId, purchase.userId),
+        inArray(schema.enrollments.userId, userIdsWithAccess),
         eq(schema.enrollments.courseId, purchase.courseId)
       )
     )
@@ -338,9 +382,10 @@ function revokeAccessFromPurchase(
 }
 
 // Runs after the request has moved from Open to Approved, in that transaction.
-function recordApproval(tx: RefundsTx, refundRequestId: number) {
+function recordApproval(tx: RefundsTx, refundRequestId: number, now: Date) {
   const purchase = tx
     .select({
+      id: schema.purchases.id,
       userId: schema.purchases.userId,
       courseId: schema.purchases.courseId,
       amountPaid: schema.purchases.amountPaid,
@@ -365,7 +410,7 @@ function recordApproval(tx: RefundsTx, refundRequestId: number) {
     .where(eq(schema.refunds.id, refundRequestId))
     .run();
 
-  revokeAccessFromPurchase(tx, purchase);
+  revokeAccessFromPurchase(tx, purchase, now);
 }
 
 /**
@@ -417,7 +462,7 @@ function resolveRefundRequest(
     }
 
     if (status === schema.RefundStatus.Approved) {
-      recordApproval(tx, refundRequestId);
+      recordApproval(tx, refundRequestId, now);
     }
 
     return { ok: true };
