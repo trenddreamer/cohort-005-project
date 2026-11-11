@@ -871,3 +871,136 @@ describe("approveRefundRequest", () => {
     }
   );
 });
+
+// ─── Listing resolved Refund Requests ───
+
+describe("listRefundRequests for resolved requests", () => {
+  function addAdmin(name: string, email: string) {
+    return db
+      .insert(schema.users)
+      .values({ name, email, role: schema.UserRole.Admin })
+      .returning()
+      .get();
+  }
+
+  function openRefundRequest(purchasedAt: string, requestedAt: string) {
+    const purchase = buyCourse(purchasedAt);
+    return db
+      .insert(schema.refunds)
+      .values({ purchaseId: purchase.id, reason: "Not for me", requestedAt })
+      .returning()
+      .get();
+  }
+
+  // The admin looking back wants what was just resolved at the top, whatever
+  // order the requests came in.
+  it("lists Declined requests most recently resolved first, with who resolved them and when", () => {
+    const ada = addAdmin("Ada Admin", "ada@example.com");
+    const bo = addAdmin("Bo Admin", "bo@example.com");
+    // Requested first but declined first too, so it ends up last.
+    const declinedFirst = openRefundRequest(
+      "2026-03-01T10:00:00",
+      "2026-03-02T09:00:00"
+    );
+    const declinedLast = openRefundRequest(
+      "2026-03-01T11:00:00",
+      "2026-03-05T09:00:00"
+    );
+    const stillOpen = openRefundRequest(
+      "2026-03-01T12:00:00",
+      "2026-03-03T09:00:00"
+    );
+    declineRefundRequest(
+      db,
+      declinedFirst.id,
+      ada.id,
+      new Date("2026-03-06T10:00:00.000Z")
+    );
+    declineRefundRequest(
+      db,
+      declinedLast.id,
+      bo.id,
+      new Date("2026-03-07T10:00:00.000Z")
+    );
+
+    const declined = listRefundRequests(db, schema.RefundStatus.Declined);
+
+    expect(declined.map((r) => r.id)).not.toContain(stillOpen.id);
+    expect(declined).toMatchObject([
+      {
+        id: declinedLast.id,
+        status: schema.RefundStatus.Declined,
+        learner: { id: base.user.id, name: "Test User" },
+        course: { id: base.course.id, title: "Test Course" },
+        reason: "Not for me",
+        resolvedBy: { id: bo.id, name: "Bo Admin" },
+        resolvedAt: "2026-03-07T10:00:00.000Z",
+        amountRefunded: null,
+      },
+      {
+        id: declinedFirst.id,
+        resolvedBy: { id: ada.id, name: "Ada Admin" },
+        resolvedAt: "2026-03-06T10:00:00.000Z",
+      },
+    ]);
+  });
+
+  it("lists Approved requests most recently resolved first, with the Amount Refunded", () => {
+    const ada = addAdmin("Ada Admin", "ada@example.com");
+    const approvedFirst = openRefundRequest(
+      "2026-03-01T10:00:00",
+      "2026-03-02T09:00:00"
+    );
+    const approvedLast = openRefundRequest(
+      "2026-03-01T11:00:00",
+      "2026-03-05T09:00:00"
+    );
+    const declined = openRefundRequest(
+      "2026-03-01T12:00:00",
+      "2026-03-03T09:00:00"
+    );
+    approveRefundRequest(
+      db,
+      approvedFirst.id,
+      ada.id,
+      new Date("2026-03-06T10:00:00.000Z")
+    );
+    approveRefundRequest(
+      db,
+      approvedLast.id,
+      ada.id,
+      new Date("2026-03-07T10:00:00.000Z")
+    );
+    declineRefundRequest(
+      db,
+      declined.id,
+      ada.id,
+      new Date("2026-03-08T10:00:00.000Z")
+    );
+    // Amount Refunded is what was paid, whatever the course costs now.
+    db.update(schema.courses).set({ price: 9900 }).run();
+
+    expect(listRefundRequests(db, schema.RefundStatus.Approved)).toMatchObject([
+      {
+        id: approvedLast.id,
+        status: schema.RefundStatus.Approved,
+        resolvedBy: { id: ada.id, name: "Ada Admin" },
+        resolvedAt: "2026-03-07T10:00:00.000Z",
+        amountRefunded: 4900,
+      },
+      {
+        id: approvedFirst.id,
+        resolvedAt: "2026-03-06T10:00:00.000Z",
+        amountRefunded: 4900,
+      },
+    ]);
+  });
+
+  it("lists an Open request with no resolver, resolved-at or Amount Refunded", () => {
+    openRefundRequest("2026-03-01T10:00:00", "2026-03-02T09:00:00");
+
+    expect(listRefundRequests(db, schema.RefundStatus.Requested)).toMatchObject(
+      [{ resolvedBy: null, resolvedAt: null, amountRefunded: null }]
+    );
+  });
+});

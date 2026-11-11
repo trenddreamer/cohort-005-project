@@ -1,5 +1,6 @@
 import type { BetterSQLite3Database } from "drizzle-orm/better-sqlite3";
 import { and, asc, desc, eq, inArray, isNotNull, sql } from "drizzle-orm";
+import { alias } from "drizzle-orm/sqlite-core";
 import * as schema from "~/db/schema";
 
 /** The app's drizzle instance, or a `createTestDb()` in tests. */
@@ -225,11 +226,20 @@ export type RefundRequestListItem = {
   isOverWatchLimit: boolean;
   /** At or over the Completion Limit. A warning for the admin, not a rule. */
   isOverCompletionLimit: boolean;
+  /** The admin who resolved it. Null while Open. */
+  resolvedBy: { id: number; name: string } | null;
+  /** When it was resolved. Null while Open. */
+  resolvedAt: string | null;
+  /** Set only on an Approved request: always the full Refundable Amount. */
+  amountRefunded: number | null;
 };
 
+const resolvers = alias(schema.users, "resolvers");
+
 /**
- * Refund Requests with the given status (`RefundStatus.Requested` is Open),
- * oldest request first.
+ * Refund Requests with the given status (`RefundStatus.Requested` is Open).
+ * Open requests come oldest request first, so whoever has waited longest is
+ * first in line; Approved and Declined ones come most recently resolved first.
  */
 export function listRefundRequests(
   db: RefundsDb,
@@ -249,6 +259,9 @@ export function listRefundRequests(
       reason: schema.refunds.reason,
       requestedAt: schema.refunds.requestedAt,
       refundableAmount: schema.purchases.amountPaid,
+      resolvedBy: { id: resolvers.id, name: resolvers.name },
+      resolvedAt: schema.refunds.resolvedAt,
+      amountRefunded: schema.refunds.amountRefunded,
     })
     .from(schema.refunds)
     .innerJoin(
@@ -257,8 +270,13 @@ export function listRefundRequests(
     )
     .innerJoin(schema.users, eq(schema.purchases.userId, schema.users.id))
     .innerJoin(schema.courses, eq(schema.purchases.courseId, schema.courses.id))
+    .leftJoin(resolvers, eq(schema.refunds.resolvedByUserId, resolvers.id))
     .where(eq(schema.refunds.status, status))
-    .orderBy(asc(schema.refunds.requestedAt), asc(schema.refunds.id))
+    .orderBy(
+      ...(status === schema.RefundStatus.Requested
+        ? [asc(schema.refunds.requestedAt), asc(schema.refunds.id)]
+        : [desc(schema.refunds.resolvedAt), desc(schema.refunds.id)])
+    )
     .all();
 
   return requests.map((request) => {
