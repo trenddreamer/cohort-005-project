@@ -369,18 +369,17 @@ function rateCourse(userId: number, courseId: number, rating: number) {
     .get();
 }
 
+type LatestPurchase = NonNullable<ReturnType<typeof getLatestPurchase>>;
+
 /**
  * What the learner is offered if they want their money back, or null if they
- * can't open a Refund Request on their latest purchase.
+ * can't open a Refund Request on `purchase`, their latest purchase.
  */
 function getRefundOffer(
+  purchase: LatestPurchase,
   userId: number,
-  course: { id: number; price: number }
+  course: { price: number }
 ) {
-  const purchase = getLatestPurchase(db, userId, course.id);
-
-  if (!purchase) return null;
-
   const eligibility = canOpenRefundRequest(
     db,
     purchase,
@@ -398,12 +397,10 @@ function getRefundOffer(
 }
 
 /**
- * The status of the Refund Request on the learner's latest purchase, or null
+ * The status of the Refund Request on `purchase`, the learner's latest, or null
  * if that purchase has none. A later purchase starts with no Refund Request.
  */
-function getRefundRequestStatus(userId: number, courseId: number) {
-  const purchase = getLatestPurchase(db, userId, courseId);
-  if (!purchase) return null;
+function getRefundRequestStatus(purchase: LatestPurchase) {
   return getRefundRequest(db, purchase.id)?.status ?? null;
 }
 
@@ -452,13 +449,17 @@ export async function loader({ params, request }: Route.LoaderArgs) {
     enrolled = isUserEnrolled(currentUserId, course.id);
     // Looked up whether or not the learner is enrolled: an Approved refund
     // removes the enrollment, and the learner still needs to see the outcome.
-    refundRequestStatus = getRefundRequestStatus(currentUserId, course.id);
+    const latestPurchase = getLatestPurchase(db, currentUserId, course.id);
+    if (latestPurchase) {
+      refundRequestStatus = getRefundRequestStatus(latestPurchase);
+    }
 
     if (enrolled) {
-      refundOffer = getRefundOffer(currentUserId, {
-        id: course.id,
-        price: courseWithDetails.price,
-      });
+      refundOffer = latestPurchase
+        ? getRefundOffer(latestPurchase, currentUserId, {
+            price: courseWithDetails.price,
+          })
+        : null;
 
       progress = calculateProgress(currentUserId, course.id, false);
 
@@ -978,7 +979,7 @@ function RequestRefund({ slug, amount }: { slug: string; amount: number }) {
             size="sm"
             onClick={() => setIsFormOpen(false)}
           >
-            Cancel
+            Keep my purchase
           </Button>
         </div>
       </fetcher.Form>

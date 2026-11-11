@@ -13,6 +13,7 @@ import { data } from "react-router";
 import { db } from "~/db";
 import { purchases, courses, enrollments } from "~/db/schema";
 import { getSeatCode, redeemSeatCode } from "~/lib/seat-codes.server";
+import { SEAT_CODE_VOIDED_MESSAGE } from "~/lib/seat-codes";
 import { eq, and } from "drizzle-orm";
 
 function getCourseById(id: number) {
@@ -195,13 +196,11 @@ export default function Redeem({
             <div className="rounded-lg bg-destructive/10 p-4">
               <div className="flex items-center justify-center gap-2 text-destructive">
                 <AlertCircle className="size-5" />
-                <span className="font-medium">
-                  This seat code no longer works
-                </span>
+                <span className="font-medium">{SEAT_CODE_VOIDED_MESSAGE}</span>
               </div>
               <p className="mt-2 text-sm text-muted-foreground">
-                The purchase this seat came from was refunded, so the seat
-                can&apos;t be claimed.
+                This seat can&apos;t be claimed. Please ask the person who
+                shared this link.
               </p>
             </div>
           ) : alreadyEnrolled ? (
@@ -229,7 +228,7 @@ export default function Redeem({
                 <span className="font-medium">Region restriction</span>
               </div>
               <p className="mt-2 text-sm text-muted-foreground">
-                This coupon can only be redeemed from the same country as the
+                This seat can only be claimed from the same country as the
                 person who purchased it. Your location doesn&apos;t match the
                 purchaser&apos;s country.
               </p>

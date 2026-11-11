@@ -13,7 +13,7 @@ _Avoid_: Chargeback, Reversal, cancellation, "cancel my purchase"
 **Open**:
 A Refund Request that nobody has resolved yet. While it is Open, the learner keeps access and the purchase still counts as revenue.
 _Say_: "Refund requested" (badge), "Requested {date}"
-_In code_: `RefundStatus.Requested` (`"requested"`), `requested_at`; aliases `getOpenRefund`, `getRequestedRefund`, `pendingChargebacks`
+_In code_: `RefundStatus.Requested` (`"requested"`), `requested_at`; alias `pendingChargebacks`
 _Avoid_: Pending, raised, "waiting on us"
 
 **Resolve**:
@@ -53,16 +53,16 @@ A learner can open a Refund Request only if the purchase is inside the Refund Wi
 
 **Refund Window**:
 The 14 calendar days from the day of purchase during which a learner can open a Refund Request.
-_In code_: `REFUND_WINDOW_DAYS`; alias `CANCEL_WINDOW_DAYS`
+_In code_: `REFUND_WINDOW_DAYS`
 _Avoid_: cancel window
 
 **Watch Limit**:
 The 2 hours of watched video at or above which a purchase can no longer be refunded.
-_In code_: `MAX_WATCHED_HOURS`; alias `CANCEL_WATCH_LIMIT_SECONDS`
+_In code_: `MAX_WATCHED_HOURS`
 
 **Completion Limit**:
 The 50% of lessons completed at or above which a purchase can no longer be refunded.
-_In code_: `COMPLETION_LIMIT`; alias `CANCEL_COMPLETION_LIMIT`
+_In code_: `COMPLETION_LIMIT`
 
 **Claimed Seat**:
 A team seat a member has taken by redeeming its coupon. One Claimed Seat makes the whole team purchase ineligible for a Refund Request.

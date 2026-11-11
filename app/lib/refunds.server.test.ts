@@ -980,6 +980,25 @@ describe("approveRefundRequest", () => {
     });
   });
 
+  // Only unclaimed seat codes become unclaimable: a Claimed Seat stays a seat
+  // on the team's record, even though its member lost access.
+  it("leaves a team purchase's Claimed Seats unvoided", () => {
+    const admin = addAdmin();
+    const olivia = addMember("Olivia");
+    const { request, codes } = openTeamRefundRequest(2);
+    claimSeat(codes[0], olivia.id, "2026-03-03T10:00:00.000Z");
+
+    approveRefundRequest(db, request.id, admin.id, now);
+
+    expect(getSeatCode(db, codes[0])).toMatchObject({
+      redeemedByUserId: olivia.id,
+      voidedAt: null,
+    });
+    expect(getSeatCode(db, codes[1])?.voidedAt).toBe(
+      "2026-03-05T15:30:00.000Z"
+    );
+  });
+
   // Only an admin resolves a Refund Request.
   it.each([
     ["an instructor", () => base.instructor.id],
@@ -1129,6 +1148,42 @@ describe("listRefundRequests for resolved requests", () => {
         resolvedAt: "2026-03-06T10:00:00.000Z",
         amountRefunded: 4900,
       },
+    ]);
+  });
+
+  // Voided seat codes are no longer seats, so the admin's seat count drops
+  // them, but the purchase was still bought for a team.
+  it("counts only the Claimed Seats of an Approved team purchase, still marking it a team purchase", () => {
+    const ada = addAdmin("Ada Admin", "ada@example.com");
+    const olivia = addMember("Olivia");
+    const { request, codes } = openTeamRefundRequest(3);
+    claimSeat(codes[0], olivia.id, "2026-03-03T10:00:00.000Z");
+    approveRefundRequest(
+      db,
+      request.id,
+      ada.id,
+      new Date("2026-03-06T10:00:00.000Z")
+    );
+
+    expect(listRefundRequests(db, schema.RefundStatus.Approved)).toMatchObject([
+      { isTeamPurchase: true, seatCount: 1, claimedSeatCount: 1 },
+    ]);
+  });
+
+  // With no seat claimed, every code is voided and there are no seats left,
+  // yet it is still a team purchase, not a solo one.
+  it("still marks an Approved team purchase with no Claimed Seats as a team purchase", () => {
+    const ada = addAdmin("Ada Admin", "ada@example.com");
+    const { request } = openTeamRefundRequest(2);
+    approveRefundRequest(
+      db,
+      request.id,
+      ada.id,
+      new Date("2026-03-06T10:00:00.000Z")
+    );
+
+    expect(listRefundRequests(db, schema.RefundStatus.Approved)).toMatchObject([
+      { isTeamPurchase: true, seatCount: 0, claimedSeatCount: 0 },
     ]);
   });
 
