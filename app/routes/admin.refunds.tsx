@@ -1,14 +1,21 @@
-import { data, isRouteErrorResponse, Link } from "react-router";
+import { useEffect } from "react";
+import { data, isRouteErrorResponse, Link, useFetcher } from "react-router";
 import { eq } from "drizzle-orm";
+import { toast } from "sonner";
+import { z } from "zod";
 import { AlertTriangle, ReceiptText } from "lucide-react";
 import type { Route } from "./+types/admin.refunds";
 import { db } from "~/db";
 import { RefundStatus, UserRole, users } from "~/db/schema";
 import { getCurrentUserId } from "~/lib/session";
 import {
+  declineRefundRequest,
   listRefundRequests,
   type RefundRequestListItem,
+  type ResolveRefundRequestResult,
 } from "~/lib/refunds.server";
+import { parseFormData } from "~/lib/validation";
+import { ConfirmDialog } from "~/components/confirm-dialog";
 import { cn, formatPrice } from "~/lib/utils";
 import { Card, CardContent } from "~/components/ui/card";
 import { Button } from "~/components/ui/button";
@@ -21,7 +28,8 @@ export function meta() {
   ];
 }
 
-export async function loader({ request }: Route.LoaderArgs) {
+// Throws 401/403 unless the current user is an admin; returns their id.
+async function requireAdminUserId(request: Request): Promise<number> {
   const currentUserId = await getCurrentUserId(request);
 
   if (!currentUserId) {
@@ -40,7 +48,66 @@ export async function loader({ request }: Route.LoaderArgs) {
     throw data("Only admins can access this page.", { status: 403 });
   }
 
+  return currentUser.id;
+}
+
+export async function loader({ request }: Route.LoaderArgs) {
+  await requireAdminUserId(request);
   return { refundRequests: listRefundRequests(db, RefundStatus.Requested) };
+}
+
+// Each intent resolves one Refund Request. Approve (#7) adds an `approve`
+// member here and a branch below.
+const resolveActionSchema = z.discriminatedUnion("intent", [
+  z.object({
+    intent: z.literal("decline"),
+    refundRequestId: z.coerce.number().int(),
+  }),
+]);
+
+type ResolveIntent = z.infer<typeof resolveActionSchema>["intent"];
+
+function resolve(
+  intent: ResolveIntent,
+  refundRequestId: number,
+  adminUserId: number,
+  now: Date
+): ResolveRefundRequestResult {
+  switch (intent) {
+    case "decline":
+      return declineRefundRequest(db, refundRequestId, adminUserId, now);
+  }
+}
+
+const ALREADY_RESOLVED_MESSAGE = "This refund request was already resolved";
+
+const RESOLVED_MESSAGES: Record<ResolveIntent, string> = {
+  decline: "Refund declined.",
+};
+
+export async function action({ request }: Route.ActionArgs) {
+  const adminUserId = await requireAdminUserId(request);
+
+  const parsed = parseFormData(await request.formData(), resolveActionSchema);
+  if (!parsed.success) {
+    throw data("Invalid refund request action.", { status: 400 });
+  }
+
+  const { intent, refundRequestId } = parsed.data;
+  const result = resolve(intent, refundRequestId, adminUserId, new Date());
+  if (result.ok) return { resolved: intent };
+
+  switch (result.error) {
+    case "not-an-admin":
+      throw data("Only admins can resolve refund requests.", { status: 403 });
+    case "not-found":
+      throw data("Refund request not found.", { status: 404 });
+    case "already-resolved":
+      // Another admin got there first. Returned (not thrown) so the screen
+      // stays up and shows a toast, and with a 2xx so the loader revalidates
+      // and the resolved row leaves the Open list.
+      return { error: ALREADY_RESOLVED_MESSAGE };
+  }
 }
 
 function formatDate(iso: string) {
@@ -71,6 +138,7 @@ const columns = [
   "Refundable amount",
   "Watched",
   "Completion",
+  "Actions",
 ];
 
 function TableHead() {
@@ -112,6 +180,53 @@ function UsageCell({
   );
 }
 
+function ResolveActions({ request }: { request: RefundRequestListItem }) {
+  const fetcher = useFetcher<typeof action>();
+
+  useEffect(() => {
+    if (fetcher.state !== "idle" || !fetcher.data) return;
+    if ("error" in fetcher.data) toast.error(fetcher.data.error);
+    else toast.success(RESOLVED_MESSAGES[fetcher.data.resolved]);
+  }, [fetcher.state, fetcher.data]);
+
+  // A resolved request is final, so it gets no buttons.
+  if (request.status !== RefundStatus.Requested) return null;
+
+  function submit(intent: ResolveIntent) {
+    fetcher.submit(
+      { intent, refundRequestId: String(request.id) },
+      { method: "post" }
+    );
+  }
+
+  return (
+    <ConfirmDialog
+      trigger={
+        <Button
+          variant="outline"
+          size="sm"
+          disabled={fetcher.state !== "idle"}
+        >
+          Decline
+        </Button>
+      }
+      title="Decline this refund request?"
+      description={
+        <>
+          <p>
+            {request.learner.name} keeps access to {request.course.title} and
+            no refund is recorded.
+          </p>
+          <p>A resolved refund request is final.</p>
+        </>
+      }
+      confirmLabel="Decline"
+      confirmVariant="destructive"
+      onConfirm={() => submit("decline")}
+    />
+  );
+}
+
 function RefundRequestRow({ request }: { request: RefundRequestListItem }) {
   return (
     <tr className="border-b border-border last:border-0 align-top">
@@ -141,6 +256,9 @@ function RefundRequestRow({ request }: { request: RefundRequestListItem }) {
         isOverLimit={request.isOverCompletionLimit}
         limitName="Completion Limit"
       />
+      <td className="px-4 py-3 text-right whitespace-nowrap">
+        <ResolveActions request={request} />
+      </td>
     </tr>
   );
 }

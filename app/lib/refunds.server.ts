@@ -208,6 +208,8 @@ export function canOpenRefundRequest(
 
 export type RefundRequestListItem = {
   id: number;
+  /** Only an Open (`RefundStatus.Requested`) request can be resolved. */
+  status: schema.RefundStatus;
   purchaseId: number;
   learner: { id: number; name: string; email: string };
   course: { id: number; title: string };
@@ -236,6 +238,7 @@ export function listRefundRequests(
   const requests = db
     .select({
       id: schema.refunds.id,
+      status: schema.refunds.status,
       purchaseId: schema.refunds.purchaseId,
       learner: {
         id: schema.users.id,
@@ -276,5 +279,83 @@ export function listRefundRequests(
       isOverWatchLimit: watchedSeconds >= MAX_WATCHED_SECONDS,
       isOverCompletionLimit: completionFraction >= COMPLETION_LIMIT,
     };
+  });
+}
+
+// ─── Resolving Refund Requests ───
+
+export type ResolveRefundRequestError =
+  | "not-an-admin"
+  | "not-found"
+  | "already-resolved";
+
+export type ResolveRefundRequestResult =
+  | { ok: true }
+  | { ok: false; error: ResolveRefundRequestError };
+
+/**
+ * Resolves an Open Refund Request in one transaction, behind the guards that
+ * Approve and Decline share: only an admin resolves, and only an Open request
+ * can be resolved. Approve widens `resolution` (Amount Refunded) and does its
+ * access changes in the same transaction once the status change has applied.
+ */
+function resolveRefundRequest(
+  db: RefundsDb,
+  refundRequestId: number,
+  actingUserId: number,
+  now: Date,
+  resolution: { status: schema.RefundStatus.Declined }
+): ResolveRefundRequestResult {
+  return db.transaction((tx) => {
+    const actingUser = tx
+      .select({ role: schema.users.role })
+      .from(schema.users)
+      .where(eq(schema.users.id, actingUserId))
+      .get();
+    if (actingUser?.role !== schema.UserRole.Admin) {
+      return { ok: false, error: "not-an-admin" };
+    }
+
+    // Only an Open request changes, so of two admins resolving at once the
+    // first one wins and the second finds it already resolved.
+    const { changes } = tx
+      .update(schema.refunds)
+      .set({
+        status: resolution.status,
+        resolvedByUserId: actingUserId,
+        resolvedAt: now.toISOString(),
+      })
+      .where(
+        and(
+          eq(schema.refunds.id, refundRequestId),
+          eq(schema.refunds.status, schema.RefundStatus.Requested)
+        )
+      )
+      .run();
+    if (changes === 0) {
+      const exists = tx
+        .select({ id: schema.refunds.id })
+        .from(schema.refunds)
+        .where(eq(schema.refunds.id, refundRequestId))
+        .get();
+      return { ok: false, error: exists ? "already-resolved" : "not-found" };
+    }
+
+    return { ok: true };
+  });
+}
+
+/**
+ * Declines an Open Refund Request. Only the status, resolver and resolved-at
+ * change: access, progress and revenue stay as they are.
+ */
+export function declineRefundRequest(
+  db: RefundsDb,
+  refundRequestId: number,
+  actingUserId: number,
+  now: Date
+): ResolveRefundRequestResult {
+  return resolveRefundRequest(db, refundRequestId, actingUserId, now, {
+    status: schema.RefundStatus.Declined,
   });
 }
