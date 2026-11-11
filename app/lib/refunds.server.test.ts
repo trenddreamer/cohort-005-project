@@ -1,8 +1,10 @@
 import { describe, it, expect, beforeEach } from "vitest";
+import { eq } from "drizzle-orm";
 import { createTestDb, seedBaseData } from "~/test/setup";
 import * as schema from "~/db/schema";
 import {
   canOpenRefundRequest,
+  declineRefundRequest,
   getCompletionFraction,
   getRefundRequest,
   getWatchedSeconds,
@@ -429,6 +431,7 @@ describe("listRefundRequests", () => {
     ).toMatchObject([
       {
         id: request.id,
+        status: schema.RefundStatus.Requested,
         purchaseId: purchase.id,
         learner: { id: base.user.id, name: "Test User", email: "test@example.com" },
         course: { id: base.course.id, title: "Test Course" },
@@ -533,6 +536,168 @@ describe("listRefundRequests", () => {
       completionFraction: 0,
       isOverWatchLimit: false,
       isOverCompletionLimit: false,
+    });
+  });
+});
+
+// ─── Declining a Refund Request ───
+
+describe("declineRefundRequest", () => {
+  const now = new Date("2026-03-05T15:30:00.000Z");
+
+  function addAdmin() {
+    return db
+      .insert(schema.users)
+      .values({
+        name: "Test Admin",
+        email: "admin@example.com",
+        role: schema.UserRole.Admin,
+      })
+      .returning()
+      .get();
+  }
+
+  function openRefundRequest(status = schema.RefundStatus.Requested) {
+    const purchase = buyCourse("2026-03-01T10:00:00");
+    return db
+      .insert(schema.refunds)
+      .values({ purchaseId: purchase.id, reason: "Not for me", status })
+      .returning()
+      .get();
+  }
+
+  function findRefundRequest(id: number) {
+    return db
+      .select()
+      .from(schema.refunds)
+      .where(eq(schema.refunds.id, id))
+      .get();
+  }
+
+  it("marks an Open Refund Request Declined, recording who declined it and when", () => {
+    const admin = addAdmin();
+    const request = openRefundRequest();
+
+    expect(declineRefundRequest(db, request.id, admin.id, now)).toEqual({
+      ok: true,
+    });
+    expect(findRefundRequest(request.id)).toMatchObject({
+      status: schema.RefundStatus.Declined,
+      resolvedByUserId: admin.id,
+      resolvedAt: "2026-03-05T15:30:00.000Z",
+      amountRefunded: null,
+    });
+  });
+
+  // Declining changes nothing but the status: the learner keeps access and
+  // progress, the purchase still counts, and team seat codes still work.
+  it("leaves enrollments, seat codes, progress and the purchase unchanged", () => {
+    const admin = addAdmin();
+    const [lesson] = addLessons(1);
+    const request = openRefundRequest();
+    db.insert(schema.enrollments)
+      .values({ userId: base.user.id, courseId: base.course.id })
+      .run();
+    const team = db.insert(schema.teams).values({}).returning().get();
+    db.insert(schema.coupons)
+      .values({
+        teamId: team.id,
+        courseId: base.course.id,
+        code: "SEAT-1",
+        purchaseId: request.purchaseId,
+      })
+      .run();
+    complete(lesson.id);
+    watch(lesson.id, 600);
+
+    const snapshot = () => ({
+      enrollments: db.select().from(schema.enrollments).all(),
+      coupons: db.select().from(schema.coupons).all(),
+      lessonProgress: db.select().from(schema.lessonProgress).all(),
+      videoWatchEvents: db.select().from(schema.videoWatchEvents).all(),
+      purchases: db.select().from(schema.purchases).all(),
+    });
+    const before = snapshot();
+
+    expect(declineRefundRequest(db, request.id, admin.id, now)).toEqual({
+      ok: true,
+    });
+    expect(snapshot()).toEqual(before);
+    expect(before.enrollments).toHaveLength(1);
+    expect(before.coupons).toHaveLength(1);
+  });
+
+  it("reports a Refund Request that doesn't exist", () => {
+    const admin = addAdmin();
+
+    expect(declineRefundRequest(db, 999, admin.id, now)).toEqual({
+      ok: false,
+      error: "not-found",
+    });
+  });
+
+  // Two admins act on the same request: the second finds it already resolved,
+  // and the first admin's decision stands.
+  it("refuses a request another admin already declined, changing nothing", () => {
+    const firstAdmin = addAdmin();
+    const secondAdmin = db
+      .insert(schema.users)
+      .values({
+        name: "Second Admin",
+        email: "admin2@example.com",
+        role: schema.UserRole.Admin,
+      })
+      .returning()
+      .get();
+    const request = openRefundRequest();
+    declineRefundRequest(db, request.id, firstAdmin.id, now);
+
+    expect(
+      declineRefundRequest(
+        db,
+        request.id,
+        secondAdmin.id,
+        new Date("2026-03-05T15:31:00.000Z")
+      )
+    ).toEqual({ ok: false, error: "already-resolved" });
+    expect(findRefundRequest(request.id)).toMatchObject({
+      status: schema.RefundStatus.Declined,
+      resolvedByUserId: firstAdmin.id,
+      resolvedAt: "2026-03-05T15:30:00.000Z",
+    });
+  });
+
+  // A resolution is final: an Approved request never becomes Declined.
+  it("refuses to decline an Approved request, changing nothing", () => {
+    const admin = addAdmin();
+    const request = openRefundRequest(schema.RefundStatus.Approved);
+
+    expect(declineRefundRequest(db, request.id, admin.id, now)).toEqual({
+      ok: false,
+      error: "already-resolved",
+    });
+    expect(findRefundRequest(request.id)).toMatchObject({
+      status: schema.RefundStatus.Approved,
+      resolvedByUserId: null,
+      resolvedAt: null,
+    });
+  });
+
+  // Only an admin resolves a Refund Request.
+  it.each([
+    ["an instructor", () => base.instructor.id],
+    ["a student", () => base.user.id],
+  ])("refuses %s, leaving the request Open", (_, actingUserId) => {
+    const request = openRefundRequest();
+
+    expect(declineRefundRequest(db, request.id, actingUserId(), now)).toEqual({
+      ok: false,
+      error: "not-an-admin",
+    });
+    expect(findRefundRequest(request.id)).toMatchObject({
+      status: schema.RefundStatus.Requested,
+      resolvedByUserId: null,
+      resolvedAt: null,
     });
   });
 });
