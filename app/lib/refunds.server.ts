@@ -1,10 +1,7 @@
-import type { BetterSQLite3Database } from "drizzle-orm/better-sqlite3";
-import { and, asc, desc, eq, inArray, isNotNull, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNotNull, isNull, sql } from "drizzle-orm";
 import { alias } from "drizzle-orm/sqlite-core";
 import * as schema from "~/db/schema";
-
-/** The app's drizzle instance, or a `createTestDb()` in tests. */
-export type RefundsDb = BetterSQLite3Database<typeof schema>;
+import type { Db } from "~/db/types";
 
 // ─── Eligibility limits (names from GLOSSARY.md) ───
 
@@ -55,7 +52,7 @@ function isInsideRefundWindow(purchase: { createdAt: string }, now: Date) {
 
 // ─── Course usage ───
 
-function getLessonIdsForCourse(db: RefundsDb, courseId: number): number[] {
+function getLessonIdsForCourse(db: Db, courseId: number): number[] {
   return db
     .select({ id: schema.lessons.id })
     .from(schema.lessons)
@@ -70,7 +67,7 @@ function getLessonIdsForCourse(db: RefundsDb, courseId: number): number[] {
  * reached in each lesson, summed over the course's lessons.
  */
 export function getWatchedSeconds(
-  db: RefundsDb,
+  db: Db,
   userId: number,
   courseId: number
 ): number {
@@ -99,7 +96,7 @@ export function getWatchedSeconds(
  * course with no lessons.
  */
 export function getCompletionFraction(
-  db: RefundsDb,
+  db: Db,
   userId: number,
   courseId: number
 ): number {
@@ -125,7 +122,7 @@ export function getCompletionFraction(
 
 /** The learner's most recent purchase of a course, if any. */
 export function getLatestPurchase(
-  db: RefundsDb,
+  db: Db,
   userId: number,
   courseId: number
 ) {
@@ -146,7 +143,7 @@ export function getLatestPurchase(
  * The purchase's Refund Request, whatever its status, if it has one. Each
  * purchase gets one Refund Request.
  */
-export function getRefundRequest(db: RefundsDb, purchaseId: number) {
+export function getRefundRequest(db: Db, purchaseId: number) {
   return db
     .select()
     .from(schema.refunds)
@@ -156,7 +153,7 @@ export function getRefundRequest(db: RefundsDb, purchaseId: number) {
 }
 
 /** Whether any team seat on the purchase has been claimed. */
-function hasClaimedSeat(db: RefundsDb, purchaseId: number): boolean {
+function hasClaimedSeat(db: Db, purchaseId: number): boolean {
   const claimedSeat = db
     .select({ id: schema.coupons.id })
     .from(schema.coupons)
@@ -170,16 +167,25 @@ function hasClaimedSeat(db: RefundsDb, purchaseId: number): boolean {
   return claimedSeat !== undefined;
 }
 
-/** A purchase's team seat codes. A purchase with any is a team purchase. */
-function getSeatCodes(db: RefundsDb | RefundsTx, purchaseId: number) {
+/**
+ * A purchase's team seat codes, voided ones included. A voided code is no
+ * longer a seat, but its row still shows the purchase was a team purchase.
+ */
+function getSeatCodes(db: Db, purchaseId: number) {
   return db
     .select({
       redeemedByUserId: schema.coupons.redeemedByUserId,
       redeemedAt: schema.coupons.redeemedAt,
+      voidedAt: schema.coupons.voidedAt,
     })
     .from(schema.coupons)
     .where(eq(schema.coupons.purchaseId, purchaseId))
     .all();
+}
+
+/** A purchase with any seat codes, even voided ones, is a team purchase. */
+function isTeamPurchase(seatCodes: readonly unknown[]): boolean {
+  return seatCodes.length > 0;
 }
 
 // ─── Eligibility ───
@@ -189,7 +195,7 @@ function getSeatCodes(db: RefundsDb | RefundsTx, purchaseId: number) {
  * first reason they can't.
  */
 export function canOpenRefundRequest(
-  db: RefundsDb,
+  db: Db,
   purchase: PurchaseForRefund,
   user: { id: number },
   now: Date
@@ -239,7 +245,7 @@ export type RefundRequestListItem = {
   isOverCompletionLimit: boolean;
   /** Bought as seat codes for a team, rather than by the learner for themselves. */
   isTeamPurchase: boolean;
-  /** Seats the team purchase bought. Zero for a solo purchase. */
+  /** Seats on the team purchase, not counting voided codes. Zero if solo. */
   seatCount: number;
   /** Seats a member has claimed. Approving removes each one's access. */
   claimedSeatCount: number;
@@ -261,7 +267,7 @@ const resolvers = alias(schema.users, "resolvers");
  * first in line; Approved and Declined ones come most recently resolved first.
  */
 export function listRefundRequests(
-  db: RefundsDb,
+  db: Db,
   status: schema.RefundStatus
 ): RefundRequestListItem[] {
   const requests = db
@@ -310,8 +316,8 @@ export function listRefundRequests(
       request.course.id
     );
     const seatCodes = getSeatCodes(db, request.purchaseId);
-    const seatCount = seatCodes.length;
-    const claimedSeats = seatCodes.flatMap((seat) =>
+    const seats = seatCodes.filter((seat) => seat.voidedAt === null);
+    const claimedSeats = seats.flatMap((seat) =>
       seat.redeemedAt === null ? [] : [seat.redeemedAt]
     );
     return {
@@ -320,8 +326,8 @@ export function listRefundRequests(
       completionFraction,
       isOverWatchLimit: watchedSeconds >= MAX_WATCHED_SECONDS,
       isOverCompletionLimit: completionFraction >= COMPLETION_LIMIT,
-      isTeamPurchase: seatCount > 0,
-      seatCount,
+      isTeamPurchase: isTeamPurchase(seatCodes),
+      seatCount: seats.length,
       claimedSeatCount: claimedSeats.length,
       claimedSeatsSinceRequested: claimedSeats.filter(
         (claimedAt) => claimedAt >= request.requestedAt
@@ -338,9 +344,6 @@ export type ResolveRefundRequestError =
 export type ResolveRefundRequestResult =
   { ok: true } | { ok: false; error: ResolveRefundRequestError };
 
-/** A transaction inside `RefundsDb.transaction`. */
-type RefundsTx = Parameters<Parameters<RefundsDb["transaction"]>[0]>[0];
-
 /**
  * Removes access from everyone who got it through the purchase by deleting
  * their enrollments for the course (ADR 0001). Lesson progress and watch
@@ -350,23 +353,28 @@ type RefundsTx = Parameters<Parameters<RefundsDb["transaction"]>[0]>[0];
  * enrolled whoever claimed its seats, not its buyer.
  */
 function revokeAccessFromPurchase(
-  tx: RefundsTx,
+  tx: Db,
   purchase: { id: number; userId: number; courseId: number },
   now: Date
 ) {
   const seatCodes = getSeatCodes(tx, purchase.id);
-  const isTeamPurchase = seatCodes.length > 0;
-  const userIdsWithAccess = isTeamPurchase
+  const isTeam = isTeamPurchase(seatCodes);
+  const userIdsWithAccess = isTeam
     ? seatCodes.flatMap((seat) =>
         seat.redeemedByUserId === null ? [] : [seat.redeemedByUserId]
       )
     : [purchase.userId];
-  if (isTeamPurchase) {
-    // Every seat code on the purchase stops counting as a seat, and the
-    // unclaimed ones can no longer be claimed.
+  if (isTeam) {
+    // Unclaimed seat codes can no longer be claimed and stop counting as
+    // seats. Claimed Seats stay on record; their members lose access below.
     tx.update(schema.coupons)
       .set({ voidedAt: now.toISOString() })
-      .where(eq(schema.coupons.purchaseId, purchase.id))
+      .where(
+        and(
+          eq(schema.coupons.purchaseId, purchase.id),
+          isNull(schema.coupons.redeemedByUserId)
+        )
+      )
       .run();
   }
   if (userIdsWithAccess.length === 0) return;
@@ -382,7 +390,7 @@ function revokeAccessFromPurchase(
 }
 
 // Runs after the request has moved from Open to Approved, in that transaction.
-function recordApproval(tx: RefundsTx, refundRequestId: number, now: Date) {
+function recordApproval(tx: Db, refundRequestId: number, now: Date) {
   const purchase = tx
     .select({
       id: schema.purchases.id,
@@ -420,7 +428,7 @@ function recordApproval(tx: RefundsTx, refundRequestId: number, now: Date) {
  * access in the same transaction, so a failure leaves the request Open.
  */
 function resolveRefundRequest(
-  db: RefundsDb,
+  db: Db,
   refundRequestId: number,
   actingUserId: number,
   now: Date,
@@ -474,7 +482,7 @@ function resolveRefundRequest(
  * change: access, progress and revenue stay as they are.
  */
 export function declineRefundRequest(
-  db: RefundsDb,
+  db: Db,
   refundRequestId: number,
   actingUserId: number,
   now: Date
@@ -496,7 +504,7 @@ export function declineRefundRequest(
  * again carries on where they left off.
  */
 export function approveRefundRequest(
-  db: RefundsDb,
+  db: Db,
   refundRequestId: number,
   actingUserId: number,
   now: Date

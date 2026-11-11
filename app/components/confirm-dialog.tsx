@@ -13,7 +13,6 @@ export function ConfirmDialog({
   description,
   confirmLabel,
   confirmVariant = "default",
-  cancelLabel = "Cancel",
   onConfirm,
 }: {
   trigger: ReactNode;
@@ -21,7 +20,6 @@ export function ConfirmDialog({
   description: ReactNode;
   confirmLabel: string;
   confirmVariant?: "default" | "destructive";
-  cancelLabel?: string;
   onConfirm: () => void;
 }) {
   return (
@@ -40,7 +38,7 @@ export function ConfirmDialog({
           </AlertDialog.Description>
           <div className="mt-6 flex justify-end gap-3">
             <AlertDialog.Cancel asChild>
-              <Button variant="outline">{cancelLabel}</Button>
+              <Button variant="outline">Cancel</Button>
             </AlertDialog.Cancel>
             <AlertDialog.Action asChild>
               <Button variant={confirmVariant} onClick={onConfirm}>

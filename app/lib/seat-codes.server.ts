@@ -1,21 +1,15 @@
-import type { BetterSQLite3Database } from "drizzle-orm/better-sqlite3";
 import { and, eq } from "drizzle-orm";
 import * as schema from "~/db/schema";
+import type { Db } from "~/db/types";
+import { SEAT_CODE_VOIDED_MESSAGE } from "~/lib/seat-codes";
 
-/** The app's drizzle instance, or a `createTestDb()` in tests. */
-export type SeatCodesDb = BetterSQLite3Database<typeof schema>;
-
-export function getSeatCode(db: SeatCodesDb, code: string) {
+export function getSeatCode(db: Db, code: string) {
   return db
     .select()
     .from(schema.coupons)
     .where(eq(schema.coupons.code, code))
     .get();
 }
-
-/** Shown for a seat code whose purchase's Refund Request was Approved. */
-export const SEAT_CODE_VOIDED_MESSAGE =
-  "This seat code no longer works: its purchase was refunded";
 
 export type RedeemSeatCodeResult =
   | { ok: true; enrollment: typeof schema.enrollments.$inferSelect }
@@ -26,24 +20,20 @@ export type RedeemSeatCodeResult =
  * them in its course, in one transaction.
  */
 export function redeemSeatCode(
-  db: SeatCodesDb,
+  db: Db,
   code: string,
   userId: number,
   userCountry: string,
   now: Date
 ): RedeemSeatCodeResult {
   return db.transaction((tx) => {
-    const coupon = tx
-      .select()
-      .from(schema.coupons)
-      .where(eq(schema.coupons.code, code))
-      .get();
+    const coupon = getSeatCode(tx, code);
     if (!coupon) {
       return { ok: false, error: "Coupon not found" };
     }
 
     if (coupon.redeemedByUserId !== null) {
-      return { ok: false, error: "Coupon has already been redeemed" };
+      return { ok: false, error: "This seat has already been claimed" };
     }
 
     if (coupon.voidedAt !== null) {
@@ -73,7 +63,7 @@ export function redeemSeatCode(
       return {
         ok: false,
         error:
-          "This coupon can only be redeemed from the same country as the purchaser",
+          "This seat can only be claimed from the same country as the purchaser",
       };
     }
 

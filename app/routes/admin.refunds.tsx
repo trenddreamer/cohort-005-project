@@ -164,11 +164,11 @@ function formatCompletion(fraction: number) {
 const headerCellClass =
   "px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-muted-foreground";
 
+// The cells every row starts with, Open or resolved (see RequestCells).
+const requestColumns = ["Learner", "Course", "Requested", "Reason"];
+
 const columns = [
-  "Learner",
-  "Course",
-  "Requested",
-  "Reason",
+  ...requestColumns,
   "Refundable amount",
   "Watched",
   "Completion",
@@ -177,15 +177,12 @@ const columns = [
 
 // Resolved requests are final: no usage warnings and no actions, but who
 // resolved them and when, plus the Amount Refunded on Approved ones.
-function resolvedColumns(tab: Exclude<Tab, "open">) {
+function resolvedColumns(showAmountRefunded: boolean) {
   return [
-    "Learner",
-    "Course",
-    "Requested",
-    "Reason",
+    ...requestColumns,
     "Resolved by",
     "Resolved",
-    ...(tab === "approved" ? ["Amount refunded"] : []),
+    ...(showAmountRefunded ? ["Amount refunded"] : []),
   ];
 }
 
@@ -252,7 +249,7 @@ function TeamApprovalWarning({ request }: { request: RefundRequestListItem }) {
       <p>
         This is a team purchase of {pluralizeSeats(request.seatCount)}. Every
         member who claimed a seat loses access to{" "}
-        <em>{request.course.title}</em>, and the unclaimed seat codes stop
+        <em>{request.course.title}</em> now, and the unclaimed seat codes stop
         working.
       </p>
       {claimedSinceRequested > 0 && (
@@ -351,9 +348,9 @@ function ResolveActions({ request }: { request: RefundRequestListItem }) {
   );
 }
 
-function RefundRequestRow({ request }: { request: RefundRequestListItem }) {
+function RequestCells({ request }: { request: RefundRequestListItem }) {
   return (
-    <tr className="border-b border-border last:border-0 align-top">
+    <>
       <td className="px-4 py-3">
         <div className="text-sm font-medium">{request.learner.name}</div>
         <div className="text-xs text-muted-foreground">
@@ -370,6 +367,14 @@ function RefundRequestRow({ request }: { request: RefundRequestListItem }) {
       <td className="max-w-xs px-4 py-3 text-sm whitespace-pre-wrap">
         {request.reason}
       </td>
+    </>
+  );
+}
+
+function RefundRequestRow({ request }: { request: RefundRequestListItem }) {
+  return (
+    <tr className="border-b border-border last:border-0 align-top">
+      <RequestCells request={request} />
       <td className="px-4 py-3 text-sm whitespace-nowrap">
         {formatPrice(request.refundableAmount)}
       </td>
@@ -392,34 +397,21 @@ function RefundRequestRow({ request }: { request: RefundRequestListItem }) {
 
 function ResolvedRefundRequestRow({
   request,
+  showAmountRefunded,
 }: {
   request: RefundRequestListItem;
+  showAmountRefunded: boolean;
 }) {
   return (
     <tr className="border-b border-border last:border-0 align-top">
-      <td className="px-4 py-3">
-        <div className="text-sm font-medium">{request.learner.name}</div>
-        <div className="text-xs text-muted-foreground">
-          {request.learner.email}
-        </div>
-      </td>
-      <td className="px-4 py-3 text-sm">
-        <div>{request.course.title}</div>
-        {request.isTeamPurchase && <TeamPurchaseSeats request={request} />}
-      </td>
-      <td className="px-4 py-3 text-sm whitespace-nowrap text-muted-foreground">
-        {formatDate(request.requestedAt)}
-      </td>
-      <td className="max-w-xs px-4 py-3 text-sm whitespace-pre-wrap">
-        {request.reason}
-      </td>
+      <RequestCells request={request} />
       <td className="px-4 py-3 text-sm whitespace-nowrap">
         {request.resolvedBy?.name ?? "—"}
       </td>
       <td className="px-4 py-3 text-sm whitespace-nowrap text-muted-foreground">
         {request.resolvedAt ? formatDate(request.resolvedAt) : "—"}
       </td>
-      {request.status === RefundStatus.Approved && (
+      {showAmountRefunded && (
         <td className="px-4 py-3 text-sm whitespace-nowrap">
           {request.amountRefunded === null
             ? "—"
@@ -472,6 +464,9 @@ export default function AdminRefunds({ loaderData }: Route.ComponentProps) {
   const { tab, refundRequests } = loaderData;
   const [, setSearchParams] = useSearchParams();
   const tabName = TAB_LABELS[tab].toLowerCase();
+  // Only an Approved request has an Amount Refunded: one decision for both
+  // the column header and the cells.
+  const showAmountRefunded = TAB_STATUS[tab] === RefundStatus.Approved;
 
   function selectTab(value: string) {
     const next = tabSchema.parse(value);
@@ -538,12 +533,13 @@ export default function AdminRefunds({ loaderData }: Route.ComponentProps) {
                   </>
                 ) : (
                   <>
-                    <TableHead labels={resolvedColumns(tab)} />
+                    <TableHead labels={resolvedColumns(showAmountRefunded)} />
                     <tbody>
                       {refundRequests.map((request) => (
                         <ResolvedRefundRequestRow
                           key={request.id}
                           request={request}
+                          showAmountRefunded={showAmountRefunded}
                         />
                       ))}
                     </tbody>

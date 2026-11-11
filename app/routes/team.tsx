@@ -34,8 +34,9 @@ function getTeamForAdmin(userId: number) {
   return db.select().from(teams).where(eq(teams.id, membership.teamId)).get();
 }
 
-// Seat codes voided when their purchase's refund was approved are no longer
-// seats, so they're left out of the codes and the seat counts.
+// Approving a purchase's refund voids only its unclaimed seat codes. Those are
+// no longer seats, so they're left out of the codes and the seat counts;
+// Claimed Seats are never voided, so they still show.
 function getCouponsForTeam(teamId: number) {
   return db
     .select()
