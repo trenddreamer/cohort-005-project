@@ -16,13 +16,19 @@ _Say_: "Refund requested" (badge), "Requested {date}"
 _In code_: `RefundStatus.Requested` (`"requested"`), `requested_at`; aliases `getOpenRefund`, `getRequestedRefund`, `pendingChargebacks`
 _Avoid_: Pending, raised, "waiting on us"
 
+**Resolve**:
+To Approve or Decline an Open Refund Request. Only an admin resolves, and they do it on the refund requests screen. A resolved Refund Request is final. It never goes back to Open, and an Approved request never becomes Declined, or the other way round.
+_Say_: "resolved by {admin} on {date}"
+_In code_: `resolvedAt`, `resolvedByUserId`
+_Avoid_: process, handle, close
+
 **Approved**:
-A Refund Request the team has resolved in favour of the learner, after issuing the Refund by hand outside the app. Approval revokes the learner's enrollment and takes the Refundable Amount off revenue.
-_Say_: "Refund approved"
+A Refund Request an admin has resolved in favour of the learner. Approving records a Refund the admin has already issued by hand outside the app. It never moves money itself. The moment a request is Approved, everyone who got access through the purchase loses it, and the Refundable Amount comes off revenue. For a team purchase, that includes seats claimed while the request was Open, and any unclaimed seats can no longer be claimed. Learners keep their progress, so if they buy the course again they carry on where they left off.
+_Say_: "Refund approved", "Mark refund approved"
 _In code_: `RefundStatus.Approved`, `resolvedAt`, `resolvedByUserId`, `amountRefunded`
 
 **Declined**:
-A Refund Request the team has resolved without a Refund. Access and revenue don't change.
+A Refund Request an admin has resolved without a Refund. Access and revenue don't change.
 _Say_: "Refund declined"
 _In code_: `RefundStatus.Declined`
 
@@ -36,9 +42,14 @@ _Say_: "the amount you paid"
 _In code_: `refundableAmount`, `purchases.amountPaid`
 _Avoid_: deriving it from the course's current list price
 
+**Amount Refunded**:
+The amount recorded against an Approved Refund Request. It is always the full Refundable Amount. There are no partial refunds.
+_In code_: `amountRefunded`
+_Avoid_: partial refund
+
 ## Eligibility
 
-A learner can open a Refund Request only if the purchase is inside the Refund Window, under the Watch Limit and under the Completion Limit, has no Claimed Seat, and has no Refund Request already Open.
+A learner can open a Refund Request only if the purchase is inside the Refund Window, under the Watch Limit and under the Completion Limit, has no Claimed Seat, and has never had a Refund Request. Each purchase gets one Refund Request. Once it is Declined, the learner can't ask again.
 
 **Refund Window**:
 The 14 calendar days from the day of purchase during which a learner can open a Refund Request.
