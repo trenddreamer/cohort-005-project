@@ -2276,6 +2276,47 @@ This course is still in draft while the cluster examples are rewritten against t
     })
     .run();
 
+  // Recent purchases that can still be refunded. Each named student has one
+  // course bought in the last few days, with no progress, so it is inside the
+  // Refund Window and under the Watch and Completion Limits — the "Request a
+  // refund" button shows on that course page. Their older purchases above are
+  // left as they are, so the progress and Q&A narratives still hold.
+  const refundablePurchases = [
+    { email: "emma.wilson@student.dev", course: course3, country: "US", daysAgo: 1 },
+    // Bought at a parity-adjusted price, so the refund offer shows what was
+    // actually paid rather than the list price.
+    {
+      email: "james.park@student.dev",
+      course: course4,
+      country: "IN",
+      daysAgo: 2,
+      amountPaid: Math.round((course4.price * 0.5) / 100) * 100,
+    },
+    { email: "olivia.martinez@student.dev", course: course3, country: "US", daysAgo: 3 },
+    { email: "liam.thompson@student.dev", course: course1, country: "US", daysAgo: 2 },
+    { email: "sophia.davis@student.dev", course: course4, country: "US", daysAgo: 1 },
+  ];
+
+  for (const p of refundablePurchases) {
+    const student = studentByEmail(p.email);
+    db.insert(schema.purchases)
+      .values({
+        userId: student.id,
+        courseId: p.course.id,
+        amountPaid: p.amountPaid ?? p.course.price,
+        country: p.country,
+        createdAt: daysAgo(p.daysAgo),
+      })
+      .run();
+    db.insert(schema.enrollments)
+      .values({
+        userId: student.id,
+        courseId: p.course.id,
+        enrolledAt: daysAgo(p.daysAgo),
+      })
+      .run();
+  }
+
   console.log(`Created ${countRows(schema.purchases)} individual purchases.`);
 
   // ─── Teams, Team Members, and Coupons ───

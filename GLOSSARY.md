@@ -13,7 +13,7 @@ _Avoid_: Chargeback, Reversal, cancellation, "cancel my purchase"
 **Open**:
 A Refund Request that nobody has resolved yet. While it is Open, the learner keeps access and the purchase still counts as revenue.
 _Say_: "Refund requested" (badge), "Requested {date}"
-_In code_: `RefundStatus.Requested` (`"requested"`), `requested_at`; alias `pendingChargebacks`
+_In code_: `RefundStatus.Requested` (`"requested"`), `requested_at`
 _Avoid_: Pending, raised, "waiting on us"
 
 **Resolve**:

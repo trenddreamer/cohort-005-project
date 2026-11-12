@@ -54,7 +54,6 @@ import { resolveCountry } from "~/lib/country.server";
 import {
   calculatePppPrice,
   getCountryTierInfo,
-  getDiscountForCountry,
 } from "~/lib/ppp";
 import { parseFormData } from "~/lib/validation";
 import { MAX_RATING, MIN_RATING } from "~/lib/ratings";
@@ -375,11 +374,7 @@ type LatestPurchase = NonNullable<ReturnType<typeof getLatestPurchase>>;
  * What the learner is offered if they want their money back, or null if they
  * can't open a Refund Request on `purchase`, their latest purchase.
  */
-function getRefundOffer(
-  purchase: LatestPurchase,
-  userId: number,
-  course: { price: number }
-) {
+function getRefundOffer(purchase: LatestPurchase, userId: number) {
   const eligibility = canOpenRefundRequest(
     db,
     purchase,
@@ -388,12 +383,9 @@ function getRefundOffer(
   );
   if (!eligibility.eligible) return null;
 
-  // A purchasing-power price is given back at the price that was paid, not at
-  // the list price of the course.
-  const pppDiscount = getDiscountForCountry(purchase.country);
-  const amount = pppDiscount > 0 ? purchase.amountPaid : course.price;
-
-  return { amount, lastDayInWindow: lastDayOfRefundWindow(purchase) };
+  // The Refundable Amount is what the learner paid, never the course's
+  // current list price.
+  return { amount: purchase.amountPaid, lastDayInWindow: lastDayOfRefundWindow(purchase) };
 }
 
 /**
@@ -456,9 +448,7 @@ export async function loader({ params, request }: Route.LoaderArgs) {
 
     if (enrolled) {
       refundOffer = latestPurchase
-        ? getRefundOffer(latestPurchase, currentUserId, {
-            price: courseWithDetails.price,
-          })
+        ? getRefundOffer(latestPurchase, currentUserId)
         : null;
 
       progress = calculateProgress(currentUserId, course.id, false);
