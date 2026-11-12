@@ -12,6 +12,15 @@ Do these checks in this order before you report a change to `app/` as complete:
 | 401 "Select a user from the DevUI panel"        | No user in the session — switch users and country in the floating panel (`app/components/dev-ui.tsx`). |
 | `tsc` reports every `./+types/*` import missing | Typegen has not run. Use `npm run typecheck`, which runs `react-router typegen` first.                 |
 
+## Branches
+
+`coursework` is this repo's working branch: merge finished work into it and stay on it. `main` is a mirror of the course repo's `main` (the `upstream` remote) and only ever receives upstream commits.
+
+When the user asks for a **cleanup**, after the usual tidying, sync with upstream:
+
+1. `git fetch upstream`. If `upstream/main` has new commits, fast-forward `main` to it and push `main` to `origin`.
+2. Merge `main` into `coursework`, push `coursework`, and end on `coursework`.
+
 ## Agent skills
 
 ### Issue tracker
