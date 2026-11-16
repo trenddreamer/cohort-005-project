@@ -1,10 +1,12 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import {
   createKnockNotifier,
+  createNoopNotifier,
   knockConfigFromEnv,
   createNotifierFromEnv,
   notify,
   type KnockWorkflows,
+  type KnockUsers,
 } from "./notifier.server";
 import type { Notification, NotificationUser } from "./notifications";
 import { createRecordingNotifier } from "~/test/recording-notifier";
@@ -58,6 +60,106 @@ describe("the recording fake", () => {
   });
 });
 
+function stubUsers() {
+  const getPreferences = vi
+    .fn<KnockUsers["getPreferences"]>()
+    .mockResolvedValue({ workflows: null });
+  const setPreferences = vi
+    .fn<KnockUsers["setPreferences"]>()
+    .mockResolvedValue({});
+  return {
+    users: { getPreferences, setPreferences },
+    getPreferences,
+    setPreferences,
+  };
+}
+
+describe("the Knock Notifier preferences", () => {
+  const workflows = { trigger: vi.fn() };
+
+  it("saves one switch with a merge, in the in-app feed channel type", async () => {
+    const { users, setPreferences } = stubUsers();
+
+    await createKnockNotifier(workflows, users).setPreference(
+      7,
+      "comment-reply",
+      false
+    );
+
+    expect(setPreferences).toHaveBeenCalledWith("7", "default", {
+      __persistence_strategy__: "merge",
+      workflows: { "comment-reply": { channel_types: { in_app_feed: false } } },
+    });
+  });
+
+  it("reads everything as on when nothing is saved", async () => {
+    const { users } = stubUsers();
+
+    const preferences = await createKnockNotifier(
+      workflows,
+      users
+    ).getPreferences(7);
+
+    expect(Object.values(preferences)).toEqual(Array(7).fill(true));
+  });
+
+  it("reads a switch as off only when Knock says false", async () => {
+    const { users, getPreferences } = stubUsers();
+    getPreferences.mockResolvedValue({
+      workflows: {
+        "comment-reply": { channel_types: { in_app_feed: false } },
+        "lesson-comment": false,
+        "new-enrollment": { channel_types: { email: false } },
+        "seat-claimed": { channel_types: { in_app_feed: true } },
+      },
+    });
+
+    const preferences = await createKnockNotifier(
+      workflows,
+      users
+    ).getPreferences(7);
+
+    expect(preferences["comment-reply"]).toBe(false);
+    expect(preferences["lesson-comment"]).toBe(false);
+    expect(preferences["new-enrollment"]).toBe(true);
+    expect(preferences["seat-claimed"]).toBe(true);
+    expect(preferences["open-refund-request"]).toBe(true);
+  });
+
+  it("reads everything as on for a person Knock has never seen", async () => {
+    const { users, getPreferences } = stubUsers();
+    getPreferences.mockRejectedValue(
+      Object.assign(new Error("not found"), { status: 404 })
+    );
+
+    const preferences = await createKnockNotifier(
+      workflows,
+      users
+    ).getPreferences(7);
+
+    expect(preferences["comment-reply"]).toBe(true);
+  });
+
+  it("does not hide other failures", async () => {
+    const { users, getPreferences } = stubUsers();
+    getPreferences.mockRejectedValue(
+      Object.assign(new Error("boom"), { status: 500 })
+    );
+
+    await expect(
+      createKnockNotifier(workflows, users).getPreferences(7)
+    ).rejects.toThrow("boom");
+  });
+});
+
+describe("the no-op Notifier preferences", () => {
+  it("reads everything as on and accepts a save", async () => {
+    const notifier = createNoopNotifier();
+    await notifier.setPreference(7, "comment-reply", false);
+    expect((await notifier.getPreferences(7))["comment-reply"]).toBe(true);
+  });
+});
+
 describe("the Knock Notifier", () => {
   function stubWorkflows() {
     const trigger = vi.fn<KnockWorkflows["trigger"]>().mockResolvedValue({});
@@ -67,7 +169,9 @@ describe("the Knock Notifier", () => {
   it("triggers the workflow named by the kind, identifying people inline", async () => {
     const { workflows, trigger } = stubWorkflows();
 
-    await createKnockNotifier(workflows).send(newEnrollment([jo], sam));
+    await createKnockNotifier(workflows, stubUsers().users).send(
+      newEnrollment([jo], sam)
+    );
 
     expect(trigger).toHaveBeenCalledWith("new-enrollment", {
       recipients: [
@@ -81,7 +185,9 @@ describe("the Knock Notifier", () => {
   it("drops the actor from the recipients", async () => {
     const { workflows, trigger } = stubWorkflows();
 
-    await createKnockNotifier(workflows).send(newEnrollment([sam, jo], sam));
+    await createKnockNotifier(workflows, stubUsers().users).send(
+      newEnrollment([sam, jo], sam)
+    );
 
     expect(trigger.mock.calls[0][1].recipients.map((r) => r.id)).toEqual(["8"]);
   });
@@ -89,7 +195,9 @@ describe("the Knock Notifier", () => {
   it("sends nothing when the actor was the only recipient", async () => {
     const { workflows, trigger } = stubWorkflows();
 
-    await createKnockNotifier(workflows).send(newEnrollment([sam], sam));
+    await createKnockNotifier(workflows, stubUsers().users).send(
+      newEnrollment([sam], sam)
+    );
 
     expect(trigger).not.toHaveBeenCalled();
   });
@@ -97,7 +205,7 @@ describe("the Knock Notifier", () => {
   it("sends no actor for a Notification that has none", async () => {
     const { workflows, trigger } = stubWorkflows();
 
-    await createKnockNotifier(workflows).send({
+    await createKnockNotifier(workflows, stubUsers().users).send({
       kind: "refund-request-declined",
       recipients: [jo],
       data: { course_title: "Test Course", course_slug: "test-course" },

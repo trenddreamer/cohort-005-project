@@ -722,7 +722,7 @@ describe("declineRefundRequest", () => {
     const request = openRefundRequest();
     const statusWhenSent: (string | undefined)[] = [];
     const watching: RecordingNotifier = {
-      sent: [],
+      ...createRecordingNotifier(),
       async send() {
         statusWhenSent.push(findRefundRequest(request.id)?.status);
       },
