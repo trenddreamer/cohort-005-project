@@ -2,6 +2,7 @@ import { and, asc, desc, eq, inArray, isNotNull, isNull, sql } from "drizzle-orm
 import { alias } from "drizzle-orm/sqlite-core";
 import * as schema from "~/db/schema";
 import type { Db } from "~/db/types";
+import { excerpt } from "~/lib/excerpt";
 import { notify, type Notifier } from "~/lib/notifier.server";
 import type { NotificationUser } from "~/lib/notifications";
 
@@ -601,4 +602,66 @@ export function approveRefundRequest(
     now,
     schema.RefundStatus.Approved
   );
+}
+
+// ─── Opening a Refund Request ───
+
+export type OpenRefundRequestResult =
+  { ok: true } | { ok: false; reason: RefundIneligibleReason };
+
+/**
+ * Opens a Refund Request on `purchase` for the learner, unless the purchase
+ * is ineligible. Every admin is then sent an "open-refund-request"
+ * Notification with the learner as actor, so an admin who opens one on their
+ * own purchase is not told about it.
+ *
+ * Notifications are sent after the request is saved, and a Notifier that
+ * fails does not undo it.
+ */
+export async function openRefundRequest(
+  db: Db,
+  notifier: Notifier,
+  input: {
+    purchase: PurchaseForRefund;
+    learner: NotificationUser;
+    course: { title: string };
+    reason: string;
+    now: Date;
+  }
+): Promise<OpenRefundRequestResult> {
+  const { purchase, learner, course, reason, now } = input;
+
+  const eligibility = canOpenRefundRequest(db, purchase, learner, now);
+  if (!eligibility.eligible) return { ok: false, reason: eligibility.reason };
+
+  db.insert(schema.refunds)
+    .values({
+      purchaseId: purchase.id,
+      status: schema.RefundStatus.Requested,
+      reason,
+    })
+    .run();
+
+  const admins = db
+    .select({
+      id: schema.users.id,
+      name: schema.users.name,
+      avatarUrl: schema.users.avatarUrl,
+    })
+    .from(schema.users)
+    .where(eq(schema.users.role, schema.UserRole.Admin))
+    .all();
+
+  await notify(notifier, {
+    kind: "open-refund-request",
+    recipients: admins,
+    actor: {
+      id: learner.id,
+      name: learner.name,
+      avatarUrl: learner.avatarUrl,
+    },
+    data: { course_title: course.title, excerpt: excerpt(reason) },
+  });
+
+  return { ok: true };
 }

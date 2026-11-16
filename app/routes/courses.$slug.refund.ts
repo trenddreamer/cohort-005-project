@@ -3,13 +3,15 @@ import { z } from "zod";
 import type { Route } from "./+types/courses.$slug.refund";
 import { getCurrentUserId } from "~/lib/session";
 import { db } from "~/db";
-import { courses, refunds, users, RefundStatus } from "~/db/schema";
+import { courses, users } from "~/db/schema";
 import { eq } from "drizzle-orm";
 import { parseFormData, parseParams } from "~/lib/validation";
+import { getNotifier } from "~/lib/notifier.server";
 import { formatPrice } from "~/lib/utils";
 import {
   canOpenRefundRequest,
   getLatestPurchase,
+  openRefundRequest,
   REFUND_WINDOW_DAYS,
   type RefundIneligibleReason,
 } from "~/lib/refunds.server";
@@ -133,15 +135,18 @@ export async function action({ params, request }: Route.ActionArgs) {
     return data({ errors: parsed.errors }, { status: 400 });
   }
 
-  db
-    .insert(refunds)
-    .values({
-      purchaseId: purchase.id,
-      status: RefundStatus.Requested,
-      reason: parsed.data.reason,
-    })
-    .returning()
-    .get();
+  const opened = await openRefundRequest(db, getNotifier(), {
+    purchase,
+    learner,
+    course,
+    reason: parsed.data.reason,
+    now: new Date(),
+  });
+
+  if (!opened.ok) {
+    const { message, status } = ineligibleResponses[opened.reason];
+    throw data(message, { status });
+  }
 
   const email = buildRefundRequestEmail({
     learnerName: learner.name,

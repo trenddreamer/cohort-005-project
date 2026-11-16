@@ -14,6 +14,7 @@ import {
   getRefundRequest,
   getWatchedSeconds,
   listRefundRequests,
+  openRefundRequest,
 } from "./refunds.server";
 import { getSeatCode, redeemSeatCode } from "./seat-codes.server";
 
@@ -1326,5 +1327,115 @@ describe("listRefundRequests for resolved requests", () => {
     expect(listRefundRequests(db, schema.RefundStatus.Requested)).toMatchObject(
       [{ resolvedBy: null, resolvedAt: null, amountRefunded: null }]
     );
+  });
+});
+
+describe("openRefundRequest", () => {
+  const now = new Date("2026-03-05T15:30:00.000Z");
+  const reason = "It was not what I expected";
+
+  function addAdmin(email: string) {
+    return db
+      .insert(schema.users)
+      .values({ name: `Admin ${email}`, email, role: schema.UserRole.Admin })
+      .returning()
+      .get();
+  }
+
+  function open(
+    text: string,
+    learner = base.user,
+    purchase = buyCourse("2026-03-01T10:00:00", learner.id)
+  ) {
+    return openRefundRequest(db, notifier, {
+      purchase,
+      learner,
+      course: base.course,
+      reason: text,
+      now,
+    });
+  }
+
+  function savedRequests() {
+    return db.select().from(schema.refunds).all();
+  }
+
+  it("sends open-refund-request to the admin with the learner as actor", async () => {
+    const admin = addAdmin("a@example.com");
+
+    expect(await open(reason)).toEqual({ ok: true });
+
+    expect(savedRequests()).toHaveLength(1);
+    expect(notifier.sent).toEqual([
+      {
+        kind: "open-refund-request",
+        recipientIds: [admin.id],
+        actor: {
+          id: base.user.id,
+          name: base.user.name,
+          avatarUrl: base.user.avatarUrl,
+        },
+        data: { course_title: base.course.title, excerpt: reason },
+      },
+    ]);
+  });
+
+  it("sends to every admin", async () => {
+    const first = addAdmin("a@example.com");
+    const second = addAdmin("b@example.com");
+
+    await open(reason);
+
+    expect(notifier.sent[0].recipientIds).toEqual([first.id, second.id]);
+  });
+
+  it("does not notify an admin about their own Refund Request", async () => {
+    const admin = addAdmin("a@example.com");
+    const other = addAdmin("b@example.com");
+
+    await open(reason, admin);
+
+    expect(notifier.sent).toHaveLength(1);
+    expect(notifier.sent[0].recipientIds).toEqual([other.id]);
+  });
+
+  it("sends a long markdown reason as a plain-text excerpt of about 140 characters", async () => {
+    addAdmin("a@example.com");
+
+    await open(
+      `**Bold** and [a link](https://example.com) ${"word ".repeat(100)}`
+    );
+
+    const { excerpt } = notifier.sent[0].data as { excerpt: string };
+    expect(excerpt.startsWith("Bold and a link word word")).toBe(true);
+    expect(excerpt.endsWith("…")).toBe(true);
+    expect(excerpt.length).toBeLessThanOrEqual(140);
+    expect(excerpt.length).toBeGreaterThan(130);
+  });
+
+  it("sends nothing and saves nothing when the purchase is ineligible", async () => {
+    addAdmin("a@example.com");
+    const purchase = buyCourse("2026-01-01T10:00:00");
+
+    expect(await open(reason, base.user, purchase)).toEqual({
+      ok: false,
+      reason: "outside-refund-window",
+    });
+
+    expect(notifier.sent).toEqual([]);
+    expect(savedRequests()).toEqual([]);
+  });
+
+  it("opens the Refund Request even when the Notifier throws", async () => {
+    addAdmin("a@example.com");
+    notifier = createRecordingNotifier({
+      failWith: new Error("Knock is down"),
+    });
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    expect(await open(reason)).toEqual({ ok: true });
+
+    expect(savedRequests()).toHaveLength(1);
+    log.mockRestore();
   });
 });
