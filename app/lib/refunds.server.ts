@@ -2,6 +2,7 @@ import { and, asc, desc, eq, inArray, isNotNull, isNull, sql } from "drizzle-orm
 import { alias } from "drizzle-orm/sqlite-core";
 import * as schema from "~/db/schema";
 import type { Db } from "~/db/types";
+import { excerpt } from "~/lib/excerpt";
 import { notify, type Notifier } from "~/lib/notifier.server";
 import type { NotificationUser } from "~/lib/notifications";
 
@@ -353,12 +354,15 @@ export type ResolveRefundRequestResult =
  *
  * A solo purchase enrolled its buyer. A team purchase (one with seat codes)
  * enrolled whoever claimed its seats, not its buyer.
+ *
+ * Returns the IDs of the team members (Claimed Seats) whose access ended; a
+ * solo purchase's buyer is not one of them.
  */
 function revokeAccessFromPurchase(
   tx: Db,
   purchase: { id: number; userId: number; courseId: number },
   now: Date
-) {
+): number[] {
   const seatCodes = getSeatCodes(tx, purchase.id);
   const isTeam = isTeamPurchase(seatCodes);
   const userIdsWithAccess = isTeam
@@ -379,7 +383,7 @@ function revokeAccessFromPurchase(
       )
       .run();
   }
-  if (userIdsWithAccess.length === 0) return;
+  if (userIdsWithAccess.length === 0) return [];
 
   tx.delete(schema.enrollments)
     .where(
@@ -389,10 +393,18 @@ function revokeAccessFromPurchase(
       )
     )
     .run();
+  return isTeam ? userIdsWithAccess : [];
 }
 
+/** What approving changed, for the Notifications sent once it commits. */
+type Approval = { amountRefunded: number; revokedMemberIds: number[] };
+
 // Runs after the request has moved from Open to Approved, in that transaction.
-function recordApproval(tx: Db, refundRequestId: number, now: Date) {
+function recordApproval(
+  tx: Db,
+  refundRequestId: number,
+  now: Date
+): Approval {
   const purchase = tx
     .select({
       id: schema.purchases.id,
@@ -420,23 +432,46 @@ function recordApproval(tx: Db, refundRequestId: number, now: Date) {
     .where(eq(schema.refunds.id, refundRequestId))
     .run();
 
-  revokeAccessFromPurchase(tx, purchase, now);
+  const revokedMemberIds = revokeAccessFromPurchase(tx, purchase, now);
+  return { amountRefunded: purchase.amountPaid, revokedMemberIds };
+}
+
+// Always money, so a free purchase reads "$0.00", never "Free".
+function formatAmountRefunded(cents: number): string {
+  return `$${(cents / 100).toFixed(2)}`;
 }
 
 /** What the transaction hands out so Notifications can be sent after it commits. */
 type ResolvedRefundRequest = {
   buyer: NotificationUser;
   course: { id: number; title: string; slug: string };
+  /** Set when approving: the Amount Refunded and the members who lost access. */
+  approval?: { amountRefunded: number; revokedMembers: NotificationUser[] };
 };
 
 type ResolveOutcome =
   | { ok: true; resolved: ResolvedRefundRequest }
   | { ok: false; error: ResolveRefundRequestError };
 
+function loadNotificationUsers(tx: Db, userIds: number[]): NotificationUser[] {
+  if (userIds.length === 0) return [];
+  return tx
+    .select({
+      id: schema.users.id,
+      name: schema.users.name,
+      avatarUrl: schema.users.avatarUrl,
+    })
+    .from(schema.users)
+    .where(inArray(schema.users.id, userIds))
+    .orderBy(asc(schema.users.id))
+    .all();
+}
+
 // The buyer and the course of a Refund Request, loaded for its Notifications.
 function loadResolvedRefundRequest(
   tx: Db,
-  refundRequestId: number
+  refundRequestId: number,
+  approval?: Approval
 ): ResolvedRefundRequest {
   const row = tx
     .select({
@@ -467,6 +502,10 @@ function loadResolvedRefundRequest(
       avatarUrl: row.buyerAvatarUrl,
     },
     course: { id: row.courseId, title: row.courseTitle, slug: row.courseSlug },
+    approval: approval && {
+      amountRefunded: approval.amountRefunded,
+      revokedMembers: loadNotificationUsers(tx, approval.revokedMemberIds),
+    },
   };
 }
 
@@ -522,13 +561,14 @@ async function resolveRefundRequest(
       return { ok: false, error: exists ? "already-resolved" : "not-found" };
     }
 
-    if (status === schema.RefundStatus.Approved) {
-      recordApproval(tx, refundRequestId, now);
-    }
+    const approval =
+      status === schema.RefundStatus.Approved
+        ? recordApproval(tx, refundRequestId, now)
+        : undefined;
 
     return {
       ok: true,
-      resolved: loadResolvedRefundRequest(tx, refundRequestId),
+      resolved: loadResolvedRefundRequest(tx, refundRequestId, approval),
     };
   });
 
@@ -538,12 +578,11 @@ async function resolveRefundRequest(
   return { ok: true };
 }
 
-// Committed by now. Approving sends nothing yet: its Notifications
-// ("refund-request-approved", "access-ended") are added here.
+// Committed by now.
 async function sendResolutionNotifications(
   notifier: Notifier,
   status: schema.RefundStatus.Approved | schema.RefundStatus.Declined,
-  { buyer, course }: ResolvedRefundRequest
+  { buyer, course, approval }: ResolvedRefundRequest
 ) {
   switch (status) {
     case schema.RefundStatus.Declined:
@@ -554,6 +593,23 @@ async function sendResolutionNotifications(
       });
       return;
     case schema.RefundStatus.Approved:
+      if (!approval) return;
+      await notify(notifier, {
+        kind: "refund-request-approved",
+        recipients: [buyer],
+        data: {
+          course_title: course.title,
+          course_slug: course.slug,
+          amount: formatAmountRefunded(approval.amountRefunded),
+        },
+      });
+      if (approval.revokedMembers.length > 0) {
+        await notify(notifier, {
+          kind: "access-ended",
+          recipients: approval.revokedMembers,
+          data: { course_title: course.title, course_slug: course.slug },
+        });
+      }
       return;
   }
 }
@@ -601,4 +657,66 @@ export function approveRefundRequest(
     now,
     schema.RefundStatus.Approved
   );
+}
+
+// ─── Opening a Refund Request ───
+
+export type OpenRefundRequestResult =
+  { ok: true } | { ok: false; reason: RefundIneligibleReason };
+
+/**
+ * Opens a Refund Request on `purchase` for the learner, unless the purchase
+ * is ineligible. Every admin is then sent an "open-refund-request"
+ * Notification with the learner as actor, so an admin who opens one on their
+ * own purchase is not told about it.
+ *
+ * Notifications are sent after the request is saved, and a Notifier that
+ * fails does not undo it.
+ */
+export async function openRefundRequest(
+  db: Db,
+  notifier: Notifier,
+  input: {
+    purchase: PurchaseForRefund;
+    learner: NotificationUser;
+    course: { title: string };
+    reason: string;
+    now: Date;
+  }
+): Promise<OpenRefundRequestResult> {
+  const { purchase, learner, course, reason, now } = input;
+
+  const eligibility = canOpenRefundRequest(db, purchase, learner, now);
+  if (!eligibility.eligible) return { ok: false, reason: eligibility.reason };
+
+  db.insert(schema.refunds)
+    .values({
+      purchaseId: purchase.id,
+      status: schema.RefundStatus.Requested,
+      reason,
+    })
+    .run();
+
+  const admins = db
+    .select({
+      id: schema.users.id,
+      name: schema.users.name,
+      avatarUrl: schema.users.avatarUrl,
+    })
+    .from(schema.users)
+    .where(eq(schema.users.role, schema.UserRole.Admin))
+    .all();
+
+  await notify(notifier, {
+    kind: "open-refund-request",
+    recipients: admins,
+    actor: {
+      id: learner.id,
+      name: learner.name,
+      avatarUrl: learner.avatarUrl,
+    },
+    data: { course_title: course.title, excerpt: excerpt(reason) },
+  });
+
+  return { ok: true };
 }
