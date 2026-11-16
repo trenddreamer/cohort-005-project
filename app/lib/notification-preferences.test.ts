@@ -1,9 +1,9 @@
 import { describe, it, expect } from "vitest";
 import {
   PREFERENCE_KINDS,
-  isPreferenceKind,
+  preferenceKindSchema,
+  preferencesFrom,
   preferenceKindsFor,
-  savePreference,
   loadSwitches,
 } from "./notification-preferences";
 import { createRecordingNotifier } from "~/test/recording-notifier";
@@ -81,7 +81,7 @@ describe("loading switches", () => {
 
   it("shows a saved off switch as off", async () => {
     const notifier = createRecordingNotifier();
-    await savePreference(notifier, 5, "comment-reply", false);
+    await notifier.setPreference(5, "comment-reply", false);
 
     const switches = await loadSwitches(notifier, 5, learner);
 
@@ -92,9 +92,9 @@ describe("loading switches", () => {
 describe("saving a switch", () => {
   it("merges into the preference set and leaves the other switches", async () => {
     const notifier = createRecordingNotifier();
-    await savePreference(notifier, 5, "comment-reply", false);
-    await savePreference(notifier, 5, "lesson-comment", false);
-    await savePreference(notifier, 5, "comment-reply", true);
+    await notifier.setPreference(5, "comment-reply", false);
+    await notifier.setPreference(5, "lesson-comment", false);
+    await notifier.setPreference(5, "comment-reply", true);
 
     const saved = await notifier.getPreferences(5);
 
@@ -105,25 +105,29 @@ describe("saving a switch", () => {
 
   it("keeps one person's switches apart from another's", async () => {
     const notifier = createRecordingNotifier();
-    await savePreference(notifier, 5, "comment-reply", false);
+    await notifier.setPreference(5, "comment-reply", false);
 
     expect((await notifier.getPreferences(6))["comment-reply"]).toBe(true);
   });
+});
 
-  it("refuses to turn Access ended off", async () => {
-    const notifier = createRecordingNotifier();
-
-    const result = await savePreference(notifier, 5, "access-ended", false);
-
-    expect(result).toEqual({ ok: false });
-    expect(await notifier.getPreferences(5)).not.toHaveProperty("access-ended");
+describe("the kind a form may switch", () => {
+  it("accepts a switchable kind", () => {
+    expect(preferenceKindSchema.parse("comment-reply")).toBe("comment-reply");
   });
 
-  it("refuses a kind that does not exist", async () => {
-    const notifier = createRecordingNotifier();
-    expect(await savePreference(notifier, 5, "nope", false)).toEqual({
-      ok: false,
-    });
-    expect(isPreferenceKind("nope")).toBe(false);
+  it("refuses Access ended and kinds that do not exist", () => {
+    expect(preferenceKindSchema.safeParse("access-ended").success).toBe(false);
+    expect(preferenceKindSchema.safeParse("nope").success).toBe(false);
+  });
+});
+
+describe("building every switch", () => {
+  it("sets each switchable kind from the rule and nothing else", () => {
+    const preferences = preferencesFrom((kind) => kind !== "seat-claimed");
+
+    expect(Object.keys(preferences)).toEqual([...PREFERENCE_KINDS]);
+    expect(preferences["seat-claimed"]).toBe(false);
+    expect(preferences["comment-reply"]).toBe(true);
   });
 });

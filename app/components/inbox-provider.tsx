@@ -19,7 +19,7 @@ import {
 export type InboxConfig = {
   userId: number;
   publicKey: string;
-  feedChannelId: string;
+  inboxChannelId: string;
   token: string;
 };
 
@@ -82,15 +82,15 @@ export function InboxProvider({
   const connected = config !== null;
   const userId = config?.userId;
   const publicKey = config?.publicKey;
-  const feedChannelId = config?.feedChannelId;
+  const inboxChannelId = config?.inboxChannelId;
 
   useEffect(() => {
     const token = tokenRef.current;
-    if (userId === undefined || !publicKey || !feedChannelId || !token) return;
+    if (userId === undefined || !publicKey || !inboxChannelId || !token) return;
     const connection = connectInbox({
       userId,
       publicKey,
-      feedChannelId,
+      inboxChannelId,
       token,
       fetchToken: fetchInboxToken,
     });
@@ -110,7 +110,7 @@ export function InboxProvider({
       setState(EMPTY_INBOX_STATE);
       setIsOpen(false);
     };
-  }, [userId, publicKey, feedChannelId]);
+  }, [userId, publicKey, inboxChannelId]);
 
   const setOpen = useCallback((open: boolean) => {
     // Opening starts from the newest Notifications again.

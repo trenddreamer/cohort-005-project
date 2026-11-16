@@ -24,12 +24,13 @@ import { db } from "~/db";
 import { and, eq } from "drizzle-orm";
 import { formatPrice } from "~/lib/utils";
 import { Switch } from "radix-ui";
-import { getNotifier } from "~/lib/notifier.server";
+import { getNotifier } from "~/lib/notifier-instance.server";
+import { describeFailure } from "~/lib/notifier.server";
+import { KIND_FACTS } from "~/lib/notifications";
 import {
   loadSwitches,
+  preferenceKindSchema,
   preferenceKindsFor,
-  savePreference,
-  type PreferenceKind,
   type PreferenceSwitch,
 } from "~/lib/notification-preferences";
 import { getPreferenceAudience } from "~/lib/notification-preferences.server";
@@ -42,20 +43,10 @@ const actionSchema = z.discriminatedUnion("intent", [
   }),
   z.object({
     intent: z.literal("preference"),
-    kind: z.string(),
+    kind: preferenceKindSchema,
     enabled: z.enum(["true", "false"]),
   }),
 ]);
-
-const KIND_LABELS: Record<PreferenceKind, string> = {
-  "comment-reply": "Replies to your comments",
-  "refund-request-approved": "Refund request approved",
-  "refund-request-declined": "Refund request declined",
-  "lesson-comment": "New comments on your lessons",
-  "new-enrollment": "New enrollments",
-  "open-refund-request": "Open refund requests",
-  "seat-claimed": "Seats claimed on your team",
-};
 
 export function meta() {
   return [
@@ -109,7 +100,9 @@ export async function loader({ request }: Route.LoaderArgs) {
     switches = await loadSwitches(getNotifier(), currentUser.id, audience);
   } catch (error) {
     // The page must render even if Knock is down: show the defaults.
-    console.error("[settings] could not read Notification preferences", error);
+    console.error(
+      `[settings] could not read Notification preferences for user ${currentUser.id}: ${describeFailure(error)}`
+    );
     switches = preferenceKindsFor(audience).map((kind) => ({
       kind,
       enabled: true,
@@ -154,30 +147,21 @@ export async function action({ request }: Route.ActionArgs) {
 
   if (parsed.data.intent === "preference") {
     const audience = getPreferenceAudience(db, currentUser);
-    const allowed = preferenceKindsFor(audience);
     const { kind, enabled } = parsed.data;
-    if (!allowed.some((allowedKind) => allowedKind === kind)) {
-      return data(
-        { errors: { kind: "That switch isn't available." } },
-        { status: 400 }
-      );
+    if (!preferenceKindsFor(audience).includes(kind)) {
+      throw data("That switch isn't available.", { status: 403 });
     }
     try {
-      await savePreference(
-        getNotifier(),
+      await getNotifier().setPreference(
         currentUser.id,
         kind,
         enabled === "true"
       );
     } catch (error) {
       console.error(
-        "[settings] could not save a Notification preference",
-        error
+        `[settings] could not save Notification preference ${kind} for user ${currentUser.id}: ${describeFailure(error)}`
       );
-      return data(
-        { errors: { kind: "Couldn't save that. Try again." } },
-        { status: 502 }
-      );
+      throw data("Couldn't save that. Try again.", { status: 502 });
     }
     return { preferenceSaved: true };
   }
@@ -335,7 +319,7 @@ export default function Settings({ loaderData }: Route.ComponentProps) {
  * profile form's "Profile updated" toast is not triggered. */
 function NotificationSwitch({ preference }: { preference: PreferenceSwitch }) {
   const fetcher = useFetcher<typeof action>();
-  const label = KIND_LABELS[preference.kind];
+  const label = KIND_FACTS[preference.kind].label;
   const id = `notification-${preference.kind}`;
 
   // While saving, show the value being saved.

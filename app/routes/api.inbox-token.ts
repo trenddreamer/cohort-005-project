@@ -1,6 +1,6 @@
 import type { Route } from "./+types/api.inbox-token";
 import { requireUserId } from "~/lib/access.server";
-import { getNotifier } from "~/lib/notifier.server";
+import { getNotifier } from "~/lib/notifier-instance.server";
 
 /**
  * A fresh Inbox token for the signed-in user. The Inbox asks for one shortly

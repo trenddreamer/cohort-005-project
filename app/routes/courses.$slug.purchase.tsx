@@ -16,7 +16,7 @@ import {
 } from "~/db/schema";
 import { eq, and, or, sql } from "drizzle-orm";
 import { buyCourse, buyTeamSeats } from "~/lib/purchases.server";
-import { getNotifier } from "~/lib/notifier.server";
+import { getNotifier } from "~/lib/notifier-instance.server";
 import { Card, CardContent } from "~/components/ui/card";
 import { Button } from "~/components/ui/button";
 import {

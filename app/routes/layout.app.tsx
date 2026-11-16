@@ -4,7 +4,8 @@ import { Sidebar } from "~/components/sidebar";
 import { DevUI } from "~/components/dev-ui";
 import { InboxProvider } from "~/components/inbox-provider";
 import { InboxToasts } from "~/components/inbox-toasts";
-import { getNotifier, knockConfigFromEnv } from "~/lib/notifier.server";
+import { getNotifier } from "~/lib/notifier-instance.server";
+import { knockConfigFromEnv } from "~/lib/notifier.server";
 import { Toaster } from "sonner";
 import { getCurrentUserId, getDevCountry } from "~/lib/session";
 import { getCountryTierInfo, COUNTRIES } from "~/lib/ppp";
@@ -188,7 +189,7 @@ async function getInboxConfig(userId: number | null) {
     return {
       userId,
       publicKey: config.publicKey,
-      feedChannelId: config.feedChannelId,
+      inboxChannelId: config.inboxChannelId,
       token,
     };
   } catch (error) {

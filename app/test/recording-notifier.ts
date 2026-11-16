@@ -1,6 +1,6 @@
 import type { Notification } from "~/lib/notifications";
 import {
-  PREFERENCE_KINDS,
+  preferencesFrom,
   type Preferences,
 } from "~/lib/notification-preferences";
 import { recipientsWithoutActor, type Notifier } from "~/lib/notifier.server";
@@ -47,10 +47,8 @@ export function createRecordingNotifier(
       });
     },
     async getPreferences(userId) {
-      const preferences = Object.fromEntries(
-        PREFERENCE_KINDS.map((kind) => [kind, true])
-      ) as Preferences;
-      return { ...preferences, ...saved.get(userId) };
+      const own = saved.get(userId);
+      return preferencesFrom((kind) => own?.[kind] ?? true);
     },
     async setPreference(userId, kind, enabled) {
       saved.set(userId, { ...saved.get(userId), [kind]: enabled });

@@ -1,27 +1,46 @@
-import type { NotificationKind } from "~/lib/notifications";
+import { z } from "zod";
+import {
+  KIND_FACTS,
+  NOTIFICATION_KINDS,
+  type NotificationKind,
+} from "~/lib/notifications";
 import type { Notifier } from "~/lib/notifier.server";
 
-/**
- * The kinds a person can switch off. "Access ended" is left out on purpose:
- * its workflow overrides preferences, so it always arrives.
- */
-export const PREFERENCE_KINDS = [
-  "comment-reply",
-  "refund-request-approved",
-  "refund-request-declined",
-  "lesson-comment",
-  "new-enrollment",
-  "open-refund-request",
-  "seat-claimed",
-] as const satisfies readonly NotificationKind[];
+/** The kinds a person can switch off: the `switchable` ones in `KIND_FACTS`. */
+export type PreferenceKind = {
+  [K in NotificationKind]: (typeof KIND_FACTS)[K]["switchable"] extends true
+    ? K
+    : never;
+}[NotificationKind];
 
-export type PreferenceKind = (typeof PREFERENCE_KINDS)[number];
+export const PREFERENCE_KINDS = NOTIFICATION_KINDS.filter(
+  (kind): kind is PreferenceKind => KIND_FACTS[kind].switchable
+);
+
+const [firstKind, ...otherKinds] = PREFERENCE_KINDS;
+
+/** Parses a form value into a switchable kind; "access-ended" is refused. */
+export const preferenceKindSchema = z.enum([firstKind, ...otherKinds]);
 
 /** Every switch, on or off. A kind nobody has saved is on. */
 export type Preferences = Record<PreferenceKind, boolean>;
 
-export function isPreferenceKind(value: string): value is PreferenceKind {
-  return (PREFERENCE_KINDS as readonly string[]).includes(value);
+function isComplete(
+  preferences: Partial<Preferences>
+): preferences is Preferences {
+  return PREFERENCE_KINDS.every((kind) => preferences[kind] !== undefined);
+}
+
+/** Builds every switch from a rule that says whether each one is on. */
+export function preferencesFrom(
+  isOn: (kind: PreferenceKind) => boolean
+): Preferences {
+  const preferences: Partial<Preferences> = {};
+  for (const kind of PREFERENCE_KINDS) preferences[kind] = isOn(kind);
+  if (!isComplete(preferences)) {
+    throw new Error("Every preference kind must be set.");
+  }
+  return preferences;
 }
 
 /** What a person is or has, which decides what they could be sent. */
@@ -65,20 +84,4 @@ export async function loadSwitches(
     kind,
     enabled: saved[kind],
   }));
-}
-
-/**
- * Saves one switch. Takes the kind as a string because it comes from a form:
- * anything that is not a switchable kind (including "access-ended") is
- * refused and nothing is saved.
- */
-export async function savePreference(
-  notifier: Notifier,
-  userId: number,
-  kind: string,
-  enabled: boolean
-): Promise<{ ok: true } | { ok: false }> {
-  if (!isPreferenceKind(kind)) return { ok: false };
-  await notifier.setPreference(userId, kind, enabled);
-  return { ok: true };
 }

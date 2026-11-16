@@ -87,7 +87,8 @@ describe("toInboxItem", () => {
 });
 
 describe("inboxFooter", () => {
-  const item = toInboxItem(feedItem({}))!;
+  const item = toInboxItem(feedItem({}));
+  if (!item) throw new Error("Expected the plain feed item to convert.");
   const state = (overrides: Partial<InboxState>): InboxState => ({
     ...EMPTY_INBOX_STATE,
     items: [item],

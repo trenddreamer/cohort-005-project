@@ -1,7 +1,7 @@
 import Knock, { signUserToken } from "@knocklabs/node";
 import type { Notification, NotificationUser } from "~/lib/notifications";
 import {
-  PREFERENCE_KINDS,
+  preferencesFrom,
   type PreferenceKind,
   type Preferences,
 } from "~/lib/notification-preferences";
@@ -67,14 +67,21 @@ export async function notify(
   try {
     await notifier.send(notification);
   } catch (error) {
-    const recipientIds = notification.recipients
-      .map((user) => user.id)
-      .join(", ");
-    console.error(
-      `[notifier] ${notification.kind} to user ${recipientIds} failed: ` +
-        `${describeStatus(error)} ${describeMessage(error)}`
-    );
+    for (const recipient of recipientsWithoutActor(notification)) {
+      console.error(
+        `[notifier] ${notification.kind} to user ${recipient.id} failed: ` +
+          describeFailure(error)
+      );
+    }
   }
+}
+
+/**
+ * The HTTP status and message of a failure, for one log line. Never the error
+ * object itself: an SDK error can carry request headers and keys.
+ */
+export function describeFailure(error: unknown): string {
+  return `${describeStatus(error)} ${describeMessage(error)}`;
 }
 
 function describeStatus(error: unknown): string {
@@ -133,9 +140,7 @@ function isSwitchedOn(workflow: unknown): boolean {
 }
 
 function allOn(): Preferences {
-  return Object.fromEntries(
-    PREFERENCE_KINDS.map((kind) => [kind, true])
-  ) as Preferences;
+  return preferencesFrom(() => true);
 }
 
 function identify(user: NotificationUser) {
@@ -178,11 +183,9 @@ export function createKnockNotifier(
         if (describeStatus(error) === "404") return allOn();
         throw error;
       }
-      const preferences = allOn();
-      for (const kind of PREFERENCE_KINDS) {
-        preferences[kind] = isSwitchedOn(workflowPreferences?.[kind]);
-      }
-      return preferences;
+      return preferencesFrom((kind) =>
+        isSwitchedOn(workflowPreferences?.[kind])
+      );
     },
     async setPreference(userId, kind, enabled) {
       await users.setPreferences(String(userId), PREFERENCE_SET_ID, {
@@ -220,8 +223,8 @@ export type KnockConfig = {
   apiKey: string;
   /** Public key the browser uses to read the Inbox. */
   publicKey: string;
-  /** The in-app feed Channel the Inbox reads. */
-  feedChannelId: string;
+  /** The Knock channel the Inbox reads: Knock's in-app feed Channel. */
+  inboxChannelId: string;
   /** Signs Inbox tokens: a PEM or base64 PEM. Never leaves the server. */
   signingKey: string;
 };
@@ -234,16 +237,16 @@ export type KnockConfig = {
 export function knockConfigFromEnv(env: Env): KnockConfig | null {
   const apiKey = env.KNOCK_API_KEY?.trim();
   const publicKey = env.KNOCK_PUBLIC_API_KEY?.trim();
-  const feedChannelId = env.KNOCK_FEED_CHANNEL_ID?.trim();
+  const inboxChannelId = env.KNOCK_FEED_CHANNEL_ID?.trim();
   const signingKey = env.KNOCK_SIGNING_KEY?.trim();
-  if (!apiKey || !publicKey || !feedChannelId || !signingKey) return null;
-  return { apiKey, publicKey, feedChannelId, signingKey };
+  if (!apiKey || !publicKey || !inboxChannelId || !signingKey) return null;
+  return { apiKey, publicKey, inboxChannelId, signingKey };
 }
 
 /**
  * Picks the Knock Notifier when the keys are there, else the no-op one with a
  * single warning. Reads `env` when called, not at import, to keep this module
- * free of side effects.
+ * free of side effects: `getNotifier` is what calls it, once, at server start.
  */
 export function createNotifierFromEnv(env: Env): Notifier {
   const config = knockConfigFromEnv(env);
@@ -259,12 +262,4 @@ export function createNotifierFromEnv(env: Env): Notifier {
     timeout: KNOCK_TIMEOUT_MS,
   });
   return createKnockNotifier(knock.workflows, knock.users, config.signingKey);
-}
-
-let instance: Notifier | undefined;
-
-/** The process-wide Notifier, built on first use. Routes pass it in. */
-export function getNotifier(): Notifier {
-  instance ??= createNotifierFromEnv(process.env);
-  return instance;
 }

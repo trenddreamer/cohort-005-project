@@ -55,7 +55,7 @@ export type InboxConnectionOptions = {
   /** Cadence user ID. */
   userId: number;
   publicKey: string;
-  feedChannelId: string;
+  inboxChannelId: string;
   /** A signed Inbox token for `userId`. */
   token: string;
   /**
@@ -125,7 +125,7 @@ export function connectInbox(options: InboxConnectionOptions): InboxConnection {
     identificationStrategy: "skip",
     onUserTokenExpiring: async () => (await options.fetchToken()) ?? undefined,
   });
-  const feed: Feed = knock.feeds.initialize(options.feedChannelId, {
+  const feed: Feed = knock.feeds.initialize(options.inboxChannelId, {
     page_size: PAGE_SIZE,
   });
 

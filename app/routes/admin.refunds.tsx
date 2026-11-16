@@ -13,7 +13,7 @@ import { AlertTriangle, ReceiptText, Users } from "lucide-react";
 import type { Route } from "./+types/admin.refunds";
 import { db } from "~/db";
 import { RefundStatus, UserRole, users } from "~/db/schema";
-import { getNotifier } from "~/lib/notifier.server";
+import { getNotifier } from "~/lib/notifier-instance.server";
 import { getCurrentUserId } from "~/lib/session";
 import {
   approveRefundRequest,

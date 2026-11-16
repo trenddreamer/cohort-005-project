@@ -13,7 +13,7 @@ import { data } from "react-router";
 import { db } from "~/db";
 import { purchases, courses, enrollments } from "~/db/schema";
 import { getSeatCode, redeemSeatCode } from "~/lib/seat-codes.server";
-import { getNotifier } from "~/lib/notifier.server";
+import { getNotifier } from "~/lib/notifier-instance.server";
 import { SEAT_CODE_VOIDED_MESSAGE } from "~/lib/seat-codes";
 import { eq, and } from "drizzle-orm";
 

@@ -12,7 +12,7 @@ import {
 import { MIN_COMMENT_LENGTH, MAX_COMMENT_LENGTH } from "~/lib/comments";
 import { db } from "~/db";
 import { createComment } from "~/lib/comments.server";
-import { getNotifier } from "~/lib/notifier.server";
+import { getNotifier } from "~/lib/notifier-instance.server";
 import {
   categories,
   comments,

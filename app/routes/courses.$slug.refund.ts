@@ -6,7 +6,7 @@ import { db } from "~/db";
 import { courses, users } from "~/db/schema";
 import { eq } from "drizzle-orm";
 import { parseFormData, parseParams } from "~/lib/validation";
-import { getNotifier } from "~/lib/notifier.server";
+import { getNotifier } from "~/lib/notifier-instance.server";
 import { formatPrice } from "~/lib/utils";
 import {
   canOpenRefundRequest,

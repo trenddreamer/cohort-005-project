@@ -6,6 +6,7 @@ import {
   knockConfigFromEnv,
   createNotifierFromEnv,
   notify,
+  describeFailure,
   type KnockWorkflows,
   type KnockUsers,
 } from "./notifier.server";
@@ -294,6 +295,22 @@ describe("notify", () => {
     );
   });
 
+  it("logs one line per actual recipient, never for the actor", async () => {
+    const consoleError = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => {});
+    const failing = createRecordingNotifier({
+      failWith: Object.assign(new Error("boom"), { status: 500 }),
+    });
+
+    await notify(failing, newEnrollment([jo, sam, ana], sam));
+
+    expect(consoleError.mock.calls).toEqual([
+      ["[notifier] new-enrollment to user 8 failed: 500 boom"],
+      ["[notifier] new-enrollment to user 9 failed: 500 boom"],
+    ]);
+  });
+
   it("never logs the excerpt", async () => {
     const consoleError = vi
       .spyOn(console, "error")
@@ -314,6 +331,21 @@ describe("notify", () => {
   });
 });
 
+describe("describeFailure", () => {
+  it("gives the status and message, never the error object", () => {
+    const error = Object.assign(new Error("rate limited"), {
+      status: 429,
+      headers: { authorization: "Bearer secret" },
+    });
+    expect(describeFailure(error)).toBe("429 rate limited");
+  });
+
+  it("copes with an error that has no status or is not an Error", () => {
+    expect(describeFailure(new Error("boom"))).toBe("no status boom");
+    expect(describeFailure("weird")).toBe("no status unknown error");
+  });
+});
+
 const fullEnv = {
   KNOCK_API_KEY: "sk_test_x",
   KNOCK_PUBLIC_API_KEY: "pk_test_x",
@@ -331,7 +363,7 @@ describe("choosing a Notifier from the environment", () => {
       { ...fullEnv, KNOCK_PUBLIC_API_KEY: undefined },
     ],
     [
-      "the feed channel ID is blank",
+      "the Inbox channel ID is blank",
       { ...fullEnv, KNOCK_FEED_CHANNEL_ID: " " },
     ],
     ["the signing key is empty", { ...fullEnv, KNOCK_SIGNING_KEY: "" }],
@@ -343,7 +375,7 @@ describe("choosing a Notifier from the environment", () => {
     expect(knockConfigFromEnv(fullEnv)).toEqual({
       apiKey: "sk_test_x",
       publicKey: "pk_test_x",
-      feedChannelId: "channel-1",
+      inboxChannelId: "channel-1",
       signingKey: "signing-key",
     });
   });

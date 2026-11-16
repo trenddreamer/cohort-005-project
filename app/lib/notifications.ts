@@ -49,16 +49,44 @@ export type NotificationDataByKind = {
 
 export type NotificationKind = keyof NotificationDataByKind;
 
-export const NOTIFICATION_KINDS = [
-  "refund-request-approved",
-  "refund-request-declined",
-  "comment-reply",
-  "lesson-comment",
-  "new-enrollment",
-  "open-refund-request",
-  "seat-claimed",
-  "access-ended",
-] as const satisfies readonly NotificationKind[];
+/**
+ * The per-kind facts that are not data fields, in one place: the label the
+ * Settings page shows, and whether a person can switch the kind off. "Access
+ * ended" can't be: its workflow overrides preferences, so it always arrives.
+ * The order is the order of the Settings switches.
+ */
+export const KIND_FACTS = {
+  "comment-reply": { label: "Replies to your comments", switchable: true },
+  "refund-request-approved": {
+    label: "Refund request approved",
+    switchable: true,
+  },
+  "refund-request-declined": {
+    label: "Refund request declined",
+    switchable: true,
+  },
+  "lesson-comment": {
+    label: "New comments on your lessons",
+    switchable: true,
+  },
+  "new-enrollment": { label: "New enrollments", switchable: true },
+  "open-refund-request": { label: "Open refund requests", switchable: true },
+  "seat-claimed": { label: "Seats claimed on your team", switchable: true },
+  "access-ended": { label: "Access ended", switchable: false },
+} as const satisfies Record<
+  NotificationKind,
+  { label: string; switchable: boolean }
+>;
+
+export const NOTIFICATION_KINDS = Object.keys(KIND_FACTS) as NotificationKind[];
+
+/**
+ * The same person as a Notification names them, from a user row or anything
+ * with an id, name and avatar. The one place that mapping is written.
+ */
+export function toNotificationUser(user: NotificationUser): NotificationUser {
+  return { id: user.id, name: user.name, avatarUrl: user.avatarUrl };
+}
 
 /** The kinds that name nobody as the sender. */
 type KindsWithoutActor =
