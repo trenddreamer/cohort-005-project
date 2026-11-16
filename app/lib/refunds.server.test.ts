@@ -1089,7 +1089,9 @@ describe("approveRefundRequest", () => {
 
     await approveRefundRequest(db, notifier, request.id, admin.id, now);
 
-    expect(redeemSeatCode(db, codes[1], liam.id, "", now)).toEqual({
+    expect(
+      await redeemSeatCode(db, notifier, codes[1], liam.id, "", now)
+    ).toEqual({
       ok: false,
       error: "This seat code no longer works: its purchase was refunded",
     });
