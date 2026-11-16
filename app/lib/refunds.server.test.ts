@@ -1102,6 +1102,116 @@ describe("approveRefundRequest", () => {
     });
   });
 
+  describe("Notifications", () => {
+    it("tells the buyer of a solo purchase their refund was approved, with the Amount Refunded as money, and nobody else", async () => {
+      const admin = addAdmin();
+      const request = openSoloRefundRequest();
+
+      await approveRefundRequest(db, notifier, request.id, admin.id, now);
+
+      expect(notifier.sent).toEqual([
+        {
+          kind: "refund-request-approved",
+          recipientIds: [base.user.id],
+          actor: undefined,
+          data: {
+            course_title: base.course.title,
+            course_slug: base.course.slug,
+            amount: "$49.00",
+          },
+        },
+      ]);
+    });
+
+    it("tells the buyer of a team purchase, and every member with a Claimed Seat that their access ended", async () => {
+      const admin = addAdmin();
+      const olivia = addMember("Olivia");
+      const liam = addMember("Liam");
+      const { request, codes } = openTeamRefundRequest(3);
+      claimSeat(codes[0], olivia.id, "2026-03-03T10:00:00.000Z");
+      claimSeat(codes[1], liam.id, "2026-03-04T10:00:00.000Z");
+
+      await approveRefundRequest(db, notifier, request.id, admin.id, now);
+
+      expect(notifier.sent.map((n) => [n.kind, n.recipientIds])).toEqual([
+        ["refund-request-approved", [base.user.id]],
+        ["access-ended", [olivia.id, liam.id]],
+      ]);
+      expect(notifier.sent[1]).toMatchObject({
+        actor: undefined,
+        data: {
+          course_title: base.course.title,
+          course_slug: base.course.slug,
+        },
+      });
+    });
+
+    it("tells nobody on another purchase of the same course that their access ended", async () => {
+      const admin = addAdmin();
+      const olivia = addMember("Olivia");
+      const noah = addMember("Noah");
+      const { request, codes } = openTeamRefundRequest(2);
+      claimSeat(codes[0], olivia.id, "2026-03-03T10:00:00.000Z");
+      // Another team's purchase of the same course, with a Claimed Seat.
+      const otherPurchase = buyCourse("2026-03-01T11:00:00", noah.id);
+      const otherTeam = db.insert(schema.teams).values({}).returning().get();
+      db.insert(schema.coupons)
+        .values({
+          teamId: otherTeam.id,
+          courseId: base.course.id,
+          code: "OTHER-1",
+          purchaseId: otherPurchase.id,
+        })
+        .run();
+      claimSeat("OTHER-1", noah.id, "2026-03-03T11:00:00.000Z");
+
+      await approveRefundRequest(db, notifier, request.id, admin.id, now);
+
+      expect(notifier.sent.flatMap((n) => n.recipientIds)).toEqual([
+        base.user.id,
+        olivia.id,
+      ]);
+      expect(enrollmentsOf(noah.id)).toEqual([{ courseId: base.course.id }]);
+    });
+
+    it("words a free purchase's Amount Refunded as money, not as Free", async () => {
+      const admin = addAdmin();
+      const request = openSoloRefundRequest();
+      db.update(schema.purchases)
+        .set({ amountPaid: 0 })
+        .where(eq(schema.purchases.id, request.purchaseId))
+        .run();
+
+      await approveRefundRequest(db, notifier, request.id, admin.id, now);
+
+      expect(notifier.sent[0].data).toMatchObject({ amount: "$0.00" });
+    });
+
+    it("sends nothing when the approval is refused", async () => {
+      const admin = addAdmin();
+      const approved = openSoloRefundRequest(schema.RefundStatus.Approved);
+
+      await approveRefundRequest(db, notifier, approved.id, admin.id, now);
+      await approveRefundRequest(db, notifier, 999, admin.id, now);
+      await approveRefundRequest(db, notifier, approved.id, base.user.id, now);
+
+      expect(notifier.sent).toEqual([]);
+    });
+
+    it("still approves when the Notifier throws", async () => {
+      const admin = addAdmin();
+      const request = openSoloRefundRequest();
+      const failing = createRecordingNotifier({ failWith: new Error("down") });
+
+      expect(
+        await approveRefundRequest(db, failing, request.id, admin.id, now)
+      ).toEqual({ ok: true });
+      expect(findRefundRequest(request.id)?.status).toBe(
+        schema.RefundStatus.Approved
+      );
+    });
+  });
+
   // Only unclaimed seat codes become unclaimable: a Claimed Seat stays a seat
   // on the team's record, even though its member lost access.
   it("leaves a team purchase's Claimed Seats unvoided", async () => {
