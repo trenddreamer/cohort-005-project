@@ -8,13 +8,18 @@ export const MAX_TOASTS = 3;
 export type ToastAction =
   /** One toast for one Notification. */
   | { type: "notification"; item: InboxItem }
-  /** One toast saying `count` more Notifications arrived. */
+  /**
+   * One summary toast saying `count` more Notifications arrived. `count` is
+   * the running total, so it replaces the summary already on screen.
+   */
   | { type: "overflow"; count: number };
 
 export type ToastContext = {
   videoPlaying: boolean;
-  /** Toasts currently visible. */
+  /** Notification toasts currently visible, not counting the summary. */
   toastsOnScreen: number;
+  /** The count the summary toast on screen shows, or 0 when there is none. */
+  overflowCount: number;
 };
 
 export function createToastPlanner() {
@@ -40,8 +45,15 @@ export function createToastPlanner() {
       const actions: ToastAction[] = toastable
         .slice(0, room)
         .map((item) => ({ type: "notification", item }));
+      // A later burst adds to the summary already on screen. It is one toast
+      // (same ID), so at most 3 Notification toasts plus the summary show.
       const overflow = toastable.length - actions.length;
-      if (overflow > 0) actions.push({ type: "overflow", count: overflow });
+      if (overflow > 0) {
+        actions.push({
+          type: "overflow",
+          count: context.overflowCount + overflow,
+        });
+      }
       return actions;
     },
   };

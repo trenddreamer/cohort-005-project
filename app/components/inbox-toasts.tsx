@@ -17,7 +17,9 @@ export function InboxToasts() {
   const { connected, state, markAsRead, setOpen, onArrival } = useInbox();
   const navigate = useNavigate();
   const planner = useRef(createToastPlanner());
+  // Notification toasts only; the summary toast is tracked by its count.
   const onScreen = useRef(new Set<string | number>());
+  const overflowCount = useRef(0);
   const seeded = useRef(false);
 
   // Latest callbacks, so the arrival subscription below is set up once.
@@ -45,6 +47,7 @@ export function InboxToasts() {
       const actions = planner.current.plan(items, {
         videoPlaying: isVideoPlaying(),
         toastsOnScreen: onScreen.current.size,
+        overflowCount: overflowCount.current,
       });
       for (const action of actions) {
         if (action.type === "notification") {
@@ -67,7 +70,9 @@ export function InboxToasts() {
           });
         } else {
           const id = "inbox-overflow";
-          const release = track(id);
+          // The planner's count is the running total: it replaces the toast.
+          overflowCount.current = action.count;
+          const release = () => void (overflowCount.current = 0);
           toast(
             `You have ${action.count} more new notification${
               action.count === 1 ? "" : "s"
