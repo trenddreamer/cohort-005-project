@@ -23,11 +23,39 @@ import { data, isRouteErrorResponse, Link } from "react-router";
 import { db } from "~/db";
 import { and, eq } from "drizzle-orm";
 import { formatPrice } from "~/lib/utils";
+import { Switch } from "radix-ui";
+import { getNotifier } from "~/lib/notifier.server";
+import {
+  loadSwitches,
+  preferenceKindsFor,
+  savePreference,
+  type PreferenceKind,
+  type PreferenceSwitch,
+} from "~/lib/notification-preferences";
+import { getPreferenceAudience } from "~/lib/notification-preferences.server";
 
-const settingsSchema = z.object({
-  name: z.string().trim().min(1, "Name cannot be empty."),
-  bio: z.string().trim().optional(),
-});
+const actionSchema = z.discriminatedUnion("intent", [
+  z.object({
+    intent: z.literal("profile"),
+    name: z.string().trim().min(1, "Name cannot be empty."),
+    bio: z.string().trim().optional(),
+  }),
+  z.object({
+    intent: z.literal("preference"),
+    kind: z.string(),
+    enabled: z.enum(["true", "false"]),
+  }),
+]);
+
+const KIND_LABELS: Record<PreferenceKind, string> = {
+  "comment-reply": "Replies to your comments",
+  "refund-request-approved": "Refund request approved",
+  "refund-request-declined": "Refund request declined",
+  "lesson-comment": "New comments on your lessons",
+  "new-enrollment": "New enrollments",
+  "open-refund-request": "Open refund requests",
+  "seat-claimed": "Seats claimed on your team",
+};
 
 export function meta() {
   return [
@@ -75,7 +103,21 @@ export async function loader({ request }: Route.LoaderArgs) {
     )
     .all();
 
+  const audience = getPreferenceAudience(db, currentUser);
+  let switches: PreferenceSwitch[];
+  try {
+    switches = await loadSwitches(getNotifier(), currentUser.id, audience);
+  } catch (error) {
+    // The page must render even if Knock is down: show the defaults.
+    console.error("[settings] could not read Notification preferences", error);
+    switches = preferenceKindsFor(audience).map((kind) => ({
+      kind,
+      enabled: true,
+    }));
+  }
+
   return {
+    switches,
     user: {
       id: currentUser.id,
       name: currentUser.name,
@@ -104,16 +146,45 @@ export async function action({ request }: Route.ActionArgs) {
   }
 
   const formData = await request.formData();
-  const parsed = parseFormData(formData, settingsSchema);
+  const parsed = parseFormData(formData, actionSchema);
 
   if (!parsed.success) {
     return data({ errors: parsed.errors }, { status: 400 });
   }
 
+  if (parsed.data.intent === "preference") {
+    const audience = getPreferenceAudience(db, currentUser);
+    const allowed = preferenceKindsFor(audience);
+    const { kind, enabled } = parsed.data;
+    if (!allowed.some((allowedKind) => allowedKind === kind)) {
+      return data(
+        { errors: { kind: "That switch isn't available." } },
+        { status: 400 }
+      );
+    }
+    try {
+      await savePreference(
+        getNotifier(),
+        currentUser.id,
+        kind,
+        enabled === "true"
+      );
+    } catch (error) {
+      console.error(
+        "[settings] could not save a Notification preference",
+        error
+      );
+      return data(
+        { errors: { kind: "Couldn't save that. Try again." } },
+        { status: 502 }
+      );
+    }
+    return { preferenceSaved: true };
+  }
+
   const { name, bio } = parsed.data;
 
-  db
-    .update(users)
+  db.update(users)
     .set({ name, email: currentUser.email, bio: bio || null })
     .where(eq(users.id, currentUser.id))
     .returning()
@@ -122,7 +193,7 @@ export async function action({ request }: Route.ActionArgs) {
 }
 
 export default function Settings({ loaderData }: Route.ComponentProps) {
-  const { user, openRefundRequests } = loaderData;
+  const { user, openRefundRequests, switches } = loaderData;
   const fetcher = useFetcher();
   const nameInputRef = useRef<HTMLInputElement>(null);
 
@@ -131,7 +202,8 @@ export default function Settings({ loaderData }: Route.ComponentProps) {
       toast.success("Profile updated successfully.");
     }
     if (fetcher.state === "idle" && fetcher.data?.errors) {
-      const firstError = Object.values(fetcher.data.errors)[0] as string | undefined;
+      const firstError = Object.values(fetcher.data.errors)[0] as
+        string | undefined;
       if (firstError) toast.error(firstError);
     }
   }, [fetcher.state, fetcher.data]);
@@ -160,6 +232,7 @@ export default function Settings({ loaderData }: Route.ComponentProps) {
         </CardHeader>
         <CardContent>
           <fetcher.Form method="post" className="space-y-4">
+            <input type="hidden" name="intent" value="profile" />
             <div className="space-y-2">
               <Label htmlFor="name">Name</Label>
               <Input
@@ -199,13 +272,24 @@ export default function Settings({ loaderData }: Route.ComponentProps) {
                 </p>
               </div>
             )}
-            <Button
-              type="submit"
-              disabled={fetcher.state !== "idle"}
-            >
+            <Button type="submit" disabled={fetcher.state !== "idle"}>
               {fetcher.state !== "idle" ? "Saving..." : "Save Changes"}
             </Button>
           </fetcher.Form>
+        </CardContent>
+      </Card>
+
+      <Card className="mt-8 max-w-md">
+        <CardHeader>
+          <h2 className="text-lg font-semibold">Notifications</h2>
+          <p className="text-sm text-muted-foreground">
+            Choose which Notifications reach your Inbox.
+          </p>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          {switches.map((preference) => (
+            <NotificationSwitch key={preference.kind} preference={preference} />
+          ))}
         </CardContent>
       </Card>
 
@@ -247,6 +331,50 @@ export default function Settings({ loaderData }: Route.ComponentProps) {
   );
 }
 
+/** One switch. Flipping it saves straight away, with its own fetcher so the
+ * profile form's "Profile updated" toast is not triggered. */
+function NotificationSwitch({ preference }: { preference: PreferenceSwitch }) {
+  const fetcher = useFetcher<typeof action>();
+  const label = KIND_LABELS[preference.kind];
+  const id = `notification-${preference.kind}`;
+
+  // While saving, show the value being saved.
+  const submitted = fetcher.formData?.get("enabled");
+  const checked =
+    submitted === undefined || submitted === null
+      ? preference.enabled
+      : submitted === "true";
+
+  useEffect(() => {
+    if (fetcher.state === "idle" && fetcher.data && "errors" in fetcher.data) {
+      toast.error(Object.values(fetcher.data.errors)[0]);
+    }
+  }, [fetcher.state, fetcher.data]);
+
+  return (
+    <div className="flex items-center justify-between gap-3">
+      <Label htmlFor={id}>{label}</Label>
+      <Switch.Root
+        id={id}
+        checked={checked}
+        onCheckedChange={(next) =>
+          fetcher.submit(
+            {
+              intent: "preference",
+              kind: preference.kind,
+              enabled: String(next),
+            },
+            { method: "post" }
+          )
+        }
+        className="relative h-5 w-9 shrink-0 rounded-full bg-input transition-colors data-[state=checked]:bg-primary"
+      >
+        <Switch.Thumb className="block size-4 translate-x-0.5 rounded-full bg-background transition-transform data-[state=checked]:translate-x-[18px]" />
+      </Switch.Root>
+    </div>
+  );
+}
+
 export function ErrorBoundary({ error }: Route.ErrorBoundaryProps) {
   let title = "Something went wrong";
   let message = "An unexpected error occurred.";
@@ -260,12 +388,10 @@ export function ErrorBoundary({ error }: Route.ErrorBoundaryProps) {
           : "Please select a user from the DevUI panel.";
     } else if (error.status === 404) {
       title = "User not found";
-      message =
-        typeof error.data === "string" ? error.data : "User not found.";
+      message = typeof error.data === "string" ? error.data : "User not found.";
     } else {
       title = `Error ${error.status}`;
-      message =
-        typeof error.data === "string" ? error.data : error.statusText;
+      message = typeof error.data === "string" ? error.data : error.statusText;
     }
   }
 
