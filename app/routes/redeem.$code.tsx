@@ -13,6 +13,7 @@ import { data } from "react-router";
 import { db } from "~/db";
 import { purchases, courses, enrollments } from "~/db/schema";
 import { getSeatCode, redeemSeatCode } from "~/lib/seat-codes.server";
+import { getNotifier } from "~/lib/notifier.server";
 import { SEAT_CODE_VOIDED_MESSAGE } from "~/lib/seat-codes";
 import { eq, and } from "drizzle-orm";
 
@@ -113,8 +114,9 @@ export async function action({ params, request }: Route.ActionArgs) {
   }
 
   const userCountry = await resolveCountry(request);
-  const result = redeemSeatCode(
+  const result = await redeemSeatCode(
     db,
+    getNotifier(),
     code,
     currentUserId,
     userCountry ?? "",
