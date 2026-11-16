@@ -2,6 +2,8 @@ import { Outlet } from "react-router";
 import type { Route } from "./+types/layout.app";
 import { Sidebar } from "~/components/sidebar";
 import { DevUI } from "~/components/dev-ui";
+import { InboxProvider } from "~/components/inbox-provider";
+import { getNotifier, knockConfigFromEnv } from "~/lib/notifier.server";
 import { Toaster } from "sonner";
 import { getCurrentUserId, getDevCountry } from "~/lib/session";
 import { getCountryTierInfo, COUNTRIES } from "~/lib/ppp";
@@ -171,6 +173,32 @@ function getRecentlyProgressedCourses(userId: number, limit: number = 3) {
     .all();
 }
 
+/**
+ * What the browser needs to open the signed-in user's Inbox, or null when
+ * nobody is signed in or Knock is not set up (the Inbox then shows its empty
+ * state and opens no connection).
+ */
+async function getInboxConfig(userId: number | null) {
+  const config = knockConfigFromEnv(process.env);
+  if (!userId || !config) return null;
+  try {
+    const token = await getNotifier().issueInboxToken(userId);
+    if (!token) return null;
+    return {
+      userId,
+      publicKey: config.publicKey,
+      feedChannelId: config.feedChannelId,
+      token,
+    };
+  } catch (error) {
+    console.error(
+      `[notifier] could not issue an Inbox token for user ${userId}: ` +
+        (error instanceof Error ? error.message : "unknown error")
+    );
+    return null;
+  }
+}
+
 export async function loader({ request }: Route.LoaderArgs) {
   const users = getAllUsers();
   const currentUserId = await getCurrentUserId(request);
@@ -185,7 +213,11 @@ export async function loader({ request }: Route.LoaderArgs) {
           course.courseId
         );
         const totalLessons = getTotalLessonCount(course.courseId);
-        const progress = calculateProgress(currentUserId, course.courseId, false);
+        const progress = calculateProgress(
+          currentUserId,
+          course.courseId,
+          false
+        );
         return {
           courseId: course.courseId,
           title: course.courseTitle,
@@ -199,6 +231,7 @@ export async function loader({ request }: Route.LoaderArgs) {
     : [];
 
   return {
+    inbox: await getInboxConfig(currentUserId),
     users: users.map((u) => ({ id: u.id, name: u.name, role: u.role })),
     currentUser: currentUser
       ? {
@@ -218,6 +251,7 @@ export async function loader({ request }: Route.LoaderArgs) {
 
 export default function AppLayout({ loaderData }: Route.ComponentProps) {
   const {
+    inbox,
     users,
     currentUser,
     recentCourses,
@@ -228,23 +262,25 @@ export default function AppLayout({ loaderData }: Route.ComponentProps) {
   } = loaderData;
 
   return (
-    <div className="flex h-screen overflow-hidden">
-      <Sidebar
-        currentUser={currentUser}
-        recentCourses={recentCourses}
-        isTeamAdmin={userIsTeamAdmin}
-      />
-      <main className="flex-1 overflow-y-auto">
-        <Outlet />
-      </main>
-      <DevUI
-        users={users}
-        currentUser={currentUser}
-        devCountry={devCountry}
-        countryTierInfo={countryTierInfo}
-        countries={countries}
-      />
-      <Toaster position="bottom-right" richColors closeButton />
-    </div>
+    <InboxProvider config={inbox}>
+      <div className="flex h-screen overflow-hidden">
+        <Sidebar
+          currentUser={currentUser}
+          recentCourses={recentCourses}
+          isTeamAdmin={userIsTeamAdmin}
+        />
+        <main className="flex-1 overflow-y-auto">
+          <Outlet />
+        </main>
+        <DevUI
+          users={users}
+          currentUser={currentUser}
+          devCountry={devCountry}
+          countryTierInfo={countryTierInfo}
+          countries={countries}
+        />
+        <Toaster position="bottom-right" richColors closeButton />
+      </div>
+    </InboxProvider>
   );
 }

@@ -3,6 +3,7 @@ import { useState, useEffect } from "react";
 import { cn } from "~/lib/utils";
 import { UserRole } from "~/db/schema";
 import { UserAvatar } from "~/components/user-avatar";
+import { InboxButton, InboxPanel } from "~/components/inbox";
 import {
   BookOpen,
   ChartColumn,
@@ -140,7 +141,9 @@ export function Sidebar({
         <NavLink to="/" className="text-lg font-bold tracking-tight">
           Cadence
         </NavLink>
+        {currentUser && <InboxButton />}
       </div>
+      {currentUser && <InboxPanel />}
 
       <nav className="flex-1 space-y-1 p-3">
         {navItems

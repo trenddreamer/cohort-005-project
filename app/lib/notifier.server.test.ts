@@ -1,6 +1,8 @@
+import { generateKeyPairSync, createPublicKey, verify } from "node:crypto";
 import { describe, it, expect, vi, afterEach } from "vitest";
 import {
   createKnockNotifier,
+  createNoopNotifier,
   knockConfigFromEnv,
   createNotifierFromEnv,
   notify,
@@ -8,6 +10,30 @@ import {
 } from "./notifier.server";
 import type { Notification, NotificationUser } from "./notifications";
 import { createRecordingNotifier } from "~/test/recording-notifier";
+
+// A throwaway key pair: the real signing key is never used in tests.
+const { privateKey, publicKey } = generateKeyPairSync("rsa", {
+  modulusLength: 2048,
+  privateKeyEncoding: { type: "pkcs8", format: "pem" },
+  publicKeyEncoding: { type: "spki", format: "pem" },
+});
+const signingKey = Buffer.from(privateKey).toString("base64");
+
+function decodeJwt(token: string) {
+  const [header, payload, signature] = token.split(".");
+  const json = (part: string) =>
+    JSON.parse(Buffer.from(part, "base64url").toString("utf8"));
+  return {
+    header: json(header),
+    claims: json(payload),
+    signatureValid: verify(
+      "RSA-SHA256",
+      Buffer.from(`${header}.${payload}`),
+      createPublicKey(publicKey),
+      Buffer.from(signature, "base64url")
+    ),
+  };
+}
 
 const sam: NotificationUser = { id: 7, name: "Sam", avatarUrl: null };
 const jo: NotificationUser = {
@@ -67,7 +93,9 @@ describe("the Knock Notifier", () => {
   it("triggers the workflow named by the kind, identifying people inline", async () => {
     const { workflows, trigger } = stubWorkflows();
 
-    await createKnockNotifier(workflows).send(newEnrollment([jo], sam));
+    await createKnockNotifier(workflows, signingKey).send(
+      newEnrollment([jo], sam)
+    );
 
     expect(trigger).toHaveBeenCalledWith("new-enrollment", {
       recipients: [
@@ -81,7 +109,9 @@ describe("the Knock Notifier", () => {
   it("drops the actor from the recipients", async () => {
     const { workflows, trigger } = stubWorkflows();
 
-    await createKnockNotifier(workflows).send(newEnrollment([sam, jo], sam));
+    await createKnockNotifier(workflows, signingKey).send(
+      newEnrollment([sam, jo], sam)
+    );
 
     expect(trigger.mock.calls[0][1].recipients.map((r) => r.id)).toEqual(["8"]);
   });
@@ -89,7 +119,9 @@ describe("the Knock Notifier", () => {
   it("sends nothing when the actor was the only recipient", async () => {
     const { workflows, trigger } = stubWorkflows();
 
-    await createKnockNotifier(workflows).send(newEnrollment([sam], sam));
+    await createKnockNotifier(workflows, signingKey).send(
+      newEnrollment([sam], sam)
+    );
 
     expect(trigger).not.toHaveBeenCalled();
   });
@@ -97,13 +129,44 @@ describe("the Knock Notifier", () => {
   it("sends no actor for a Notification that has none", async () => {
     const { workflows, trigger } = stubWorkflows();
 
-    await createKnockNotifier(workflows).send({
+    await createKnockNotifier(workflows, signingKey).send({
       kind: "refund-request-declined",
       recipients: [jo],
       data: { course_title: "Test Course", course_slug: "test-course" },
     });
 
     expect(trigger.mock.calls[0][1].actor).toBeUndefined();
+  });
+});
+
+describe("issuing an Inbox token", () => {
+  const workflows = { trigger: vi.fn<KnockWorkflows["trigger"]>() };
+
+  it("signs RS256 for the Cadence user ID, valid for about an hour", async () => {
+    const token = await createKnockNotifier(
+      workflows,
+      signingKey
+    ).issueInboxToken(42);
+
+    expect(token).not.toBeNull();
+    const { header, claims, signatureValid } = decodeJwt(token ?? "");
+    expect(header.alg).toBe("RS256");
+    expect(claims.sub).toBe("42");
+    expect(claims.exp - claims.iat).toBe(3600);
+    expect(signatureValid).toBe(true);
+  });
+
+  it("issues no token from the no-op Notifier", async () => {
+    await expect(createNoopNotifier().issueInboxToken(42)).resolves.toBeNull();
+  });
+
+  it("records the user IDs the recording fake issued tokens for", async () => {
+    const notifier = createRecordingNotifier();
+
+    await notifier.issueInboxToken(5);
+    await notifier.issueInboxToken(6);
+
+    expect(notifier.tokensIssuedFor).toEqual([5, 6]);
   });
 });
 
@@ -146,18 +209,37 @@ describe("notify", () => {
   });
 });
 
+const fullEnv = {
+  KNOCK_API_KEY: "sk_test_x",
+  KNOCK_PUBLIC_API_KEY: "pk_test_x",
+  KNOCK_FEED_CHANNEL_ID: "channel-1",
+  KNOCK_SIGNING_KEY: "signing-key",
+};
+
 describe("choosing a Notifier from the environment", () => {
   it.each([
-    ["missing", {}],
-    ["empty", { KNOCK_API_KEY: "" }],
-    ["blank", { KNOCK_API_KEY: "   " }],
-  ])("finds no Knock config when the key is %s", (_, env) => {
+    ["the API key is missing", {}],
+    ["the API key is empty", { ...fullEnv, KNOCK_API_KEY: "" }],
+    ["the API key is blank", { ...fullEnv, KNOCK_API_KEY: "   " }],
+    [
+      "the public key is missing",
+      { ...fullEnv, KNOCK_PUBLIC_API_KEY: undefined },
+    ],
+    [
+      "the feed channel ID is blank",
+      { ...fullEnv, KNOCK_FEED_CHANNEL_ID: " " },
+    ],
+    ["the signing key is empty", { ...fullEnv, KNOCK_SIGNING_KEY: "" }],
+  ])("finds no Knock config when %s", (_, env) => {
     expect(knockConfigFromEnv(env)).toBeNull();
   });
 
-  it("finds the Knock config when the key is set", () => {
-    expect(knockConfigFromEnv({ KNOCK_API_KEY: "sk_test_x" })).toEqual({
+  it("finds the Knock config when every setting is there", () => {
+    expect(knockConfigFromEnv(fullEnv)).toEqual({
       apiKey: "sk_test_x",
+      publicKey: "pk_test_x",
+      feedChannelId: "channel-1",
+      signingKey: "signing-key",
     });
   });
 
@@ -176,7 +258,7 @@ describe("choosing a Notifier from the environment", () => {
   it("does not warn when the key is set", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
 
-    createNotifierFromEnv({ KNOCK_API_KEY: "sk_test_x" });
+    createNotifierFromEnv(fullEnv);
 
     expect(warn).not.toHaveBeenCalled();
   });

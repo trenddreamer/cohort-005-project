@@ -1,4 +1,4 @@
-import Knock from "@knocklabs/node";
+import Knock, { signUserToken } from "@knocklabs/node";
 import type { Notification, NotificationUser } from "~/lib/notifications";
 
 /**
@@ -13,7 +13,16 @@ export interface Notifier {
    * `notify`, which turns that into one log line.
    */
   send(notification: Notification): Promise<void>;
+
+  /**
+   * Issues a token that lets that user's browser read their own Inbox:
+   * RS256, subject = the Cadence user ID, valid for about an hour. Null when
+   * Knock is not configured. Never log it.
+   */
+  issueInboxToken(userId: number): Promise<string | null>;
 }
+
+const INBOX_TOKEN_SECONDS = 60 * 60;
 
 /** The recipients who are not the actor: nobody hears about their own action. */
 export function recipientsWithoutActor(
@@ -76,8 +85,18 @@ function identify(user: NotificationUser) {
   return { id: String(user.id), name: user.name, avatar: user.avatarUrl };
 }
 
-export function createKnockNotifier(workflows: KnockWorkflows): Notifier {
+export function createKnockNotifier(
+  workflows: KnockWorkflows,
+  signingKey: string
+): Notifier {
   return {
+    async issueInboxToken(userId) {
+      // Knock matches the subject against its user ID string.
+      return signUserToken(String(userId), {
+        signingKey,
+        expiresInSeconds: INBOX_TOKEN_SECONDS,
+      });
+    },
     async send(notification) {
       const recipients = recipientsWithoutActor(notification);
       if (recipients.length === 0) return;
@@ -92,7 +111,12 @@ export function createKnockNotifier(workflows: KnockWorkflows): Notifier {
 
 /** Skips every Notification. Used when Knock keys are missing. */
 export function createNoopNotifier(): Notifier {
-  return { async send() {} };
+  return {
+    async send() {},
+    async issueInboxToken() {
+      return null;
+    },
+  };
 }
 
 // Sending is inline in the user's request, so a Knock outage must not stall
@@ -102,14 +126,29 @@ const KNOCK_TIMEOUT_MS = 5_000;
 
 type Env = Record<string, string | undefined>;
 
+export type KnockConfig = {
+  /** Server-side API key. Never leaves the server. */
+  apiKey: string;
+  /** Public key the browser uses to read the Inbox. */
+  publicKey: string;
+  /** The in-app feed Channel the Inbox reads. */
+  feedChannelId: string;
+  /** Signs Inbox tokens: a PEM or base64 PEM. Never leaves the server. */
+  signingKey: string;
+};
+
 /**
- * The Knock settings the Notifier needs, or null when they are missing. The
- * key must be present and non-empty: `new Knock({ apiKey: "" })` does not
- * throw, so the check has to be ours.
+ * The Knock settings Cadence needs, or null when any is missing. Each must be
+ * present and non-empty: `new Knock({ apiKey: "" })` does not throw, so the
+ * check has to be ours.
  */
-export function knockConfigFromEnv(env: Env): { apiKey: string } | null {
+export function knockConfigFromEnv(env: Env): KnockConfig | null {
   const apiKey = env.KNOCK_API_KEY?.trim();
-  return apiKey ? { apiKey } : null;
+  const publicKey = env.KNOCK_PUBLIC_API_KEY?.trim();
+  const feedChannelId = env.KNOCK_FEED_CHANNEL_ID?.trim();
+  const signingKey = env.KNOCK_SIGNING_KEY?.trim();
+  if (!apiKey || !publicKey || !feedChannelId || !signingKey) return null;
+  return { apiKey, publicKey, feedChannelId, signingKey };
 }
 
 /**
@@ -121,7 +160,7 @@ export function createNotifierFromEnv(env: Env): Notifier {
   const config = knockConfigFromEnv(env);
   if (!config) {
     console.warn(
-      "[notifier] KNOCK_API_KEY is missing or empty: Notifications are skipped."
+      "[notifier] a Knock setting is missing or empty (see .env): Notifications are skipped."
     );
     return createNoopNotifier();
   }
@@ -130,7 +169,7 @@ export function createNotifierFromEnv(env: Env): Notifier {
     maxRetries: KNOCK_MAX_RETRIES,
     timeout: KNOCK_TIMEOUT_MS,
   });
-  return createKnockNotifier(knock.workflows);
+  return createKnockNotifier(knock.workflows, config.signingKey);
 }
 
 let instance: Notifier | undefined;

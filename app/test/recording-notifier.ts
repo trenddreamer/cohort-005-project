@@ -11,6 +11,8 @@ export type RecordedNotification = {
 export type RecordingNotifier = Notifier & {
   /** Everything sent, in order, with the actor already dropped from recipients. */
   sent: RecordedNotification[];
+  /** The user IDs Inbox tokens were issued for, in order. */
+  tokensIssuedFor: number[];
 };
 
 /**
@@ -21,8 +23,14 @@ export function createRecordingNotifier(
   options: { failWith?: Error } = {}
 ): RecordingNotifier {
   const sent: RecordedNotification[] = [];
+  const tokensIssuedFor: number[] = [];
   return {
     sent,
+    tokensIssuedFor,
+    async issueInboxToken(userId) {
+      tokensIssuedFor.push(userId);
+      return `recording-token-${userId}`;
+    },
     async send(notification) {
       if (options.failWith) throw options.failWith;
       sent.push({

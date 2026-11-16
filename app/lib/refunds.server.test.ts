@@ -722,6 +722,10 @@ describe("declineRefundRequest", () => {
     const statusWhenSent: (string | undefined)[] = [];
     const watching: RecordingNotifier = {
       sent: [],
+      tokensIssuedFor: [],
+      async issueInboxToken() {
+        return null;
+      },
       async send() {
         statusWhenSent.push(findRefundRequest(request.id)?.status);
       },

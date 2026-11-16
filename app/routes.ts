@@ -51,6 +51,7 @@ export default [
   route("signup", "routes/signup.tsx"),
   route("login", "routes/login.tsx"),
   route("api/switch-user", "routes/api.switch-user.ts"),
+  route("api/inbox-token", "routes/api.inbox-token.ts"),
   route("api/logout", "routes/api.logout.ts"),
   route("api/video-tracking", "routes/api.video-tracking.ts"),
   route("api/set-dev-country", "routes/api.set-dev-country.ts"),
