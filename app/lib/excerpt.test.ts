@@ -12,6 +12,11 @@ describe("excerpt", () => {
     );
   });
 
+  it("does not put spaces between adjacent inline pieces of one sentence", () => {
+    expect(excerpt("foo**bar**")).toBe("foobar");
+    expect(excerpt("a*b*c and `x`y [l](u).")).toBe("abc and xy l.");
+  });
+
   it("keeps the text of links and the alt text of images", () => {
     expect(
       excerpt("See [the docs](https://example.com) ![a cat](cat.png)")

@@ -5,10 +5,27 @@ export const EXCERPT_LENGTH = 140;
 
 type WithTokens = { tokens?: Token[] };
 
+// These hold inline tokens, which run together: "foo**bar**" reads "foobar".
+const INLINE_CONTAINERS = new Set([
+  "paragraph",
+  "heading",
+  "text",
+  "strong",
+  "em",
+  "del",
+  "link",
+]);
+
 // Collects the readable text of a markdown token tree, dropping the syntax.
-// Raw HTML is dropped altogether, not escaped: the Inbox shows plain text.
+// Returns one string per block (paragraph, list item, ...), which the caller
+// joins with spaces. Raw HTML is dropped altogether, not escaped: the Inbox
+// shows plain text.
 function plainText(tokens: Token[]): string[] {
   return tokens.flatMap((token): string[] => {
+    const { tokens: children } = token as WithTokens;
+    if (children && INLINE_CONTAINERS.has(token.type)) {
+      return [plainText(children).join("")];
+    }
     switch (token.type) {
       case "html":
       case "hr":
@@ -30,7 +47,6 @@ function plainText(tokens: Token[]): string[] {
         ];
       }
       default: {
-        const { tokens: children } = token as WithTokens;
         if (children) return plainText(children);
         return "text" in token && typeof token.text === "string"
           ? [token.text]
