@@ -1,0 +1,22 @@
+{
+  "name": "New comment on your Lesson",
+  "steps": [
+    {
+      "type": "channel",
+      "template": {
+        "action_url": "{{ vars.app_url }}/courses/{{ data.course_slug }}/lessons/{{ data.lesson_id }}#comment-{{ data.comment_id }}",
+        "markdown_body@": "in_app_feed_1/markdown_body.md"
+      },
+      "ref": "in_app_feed_1",
+      "channel_type": "in_app_feed",
+      "channel_key": "in-app"
+    }
+  ],
+  "trigger_frequency": "every_trigger",
+  "__readonly": {
+    "key": "lesson-comment",
+    "active": true,
+    "valid": true
+  },
+  "$schema": "https://schemas.knock.app/cli/workflow.json"
+}

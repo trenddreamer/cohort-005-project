@@ -1,0 +1,22 @@
+{
+  "name": "New Open Refund Request",
+  "steps": [
+    {
+      "type": "channel",
+      "template": {
+        "action_url": "{{ vars.app_url }}/admin/refunds",
+        "markdown_body@": "in_app_feed_1/markdown_body.md"
+      },
+      "ref": "in_app_feed_1",
+      "channel_type": "in_app_feed",
+      "channel_key": "in-app"
+    }
+  ],
+  "trigger_frequency": "every_trigger",
+  "__readonly": {
+    "key": "open-refund-request",
+    "active": true,
+    "valid": true
+  },
+  "$schema": "https://schemas.knock.app/cli/workflow.json"
+}
