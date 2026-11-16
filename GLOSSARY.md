@@ -75,3 +75,22 @@ _Avoid_: redeemed (in copy)
 - "Cancel" is only for dismissing UI. It never means asking for a refund. The course-page button reads "Request a refund".
 - In copy, "refund" is lowercase mid-sentence, and headings and badges use sentence case.
 - Chargeback is reserved for a dispute the cardholder raises through their bank. We don't handle chargebacks today, so the word shouldn't appear anywhere.
+
+## Notifications
+
+**Notification**:
+A message to one user about something that happened in Cadence. It sits in their in-app inbox and is either read or unread.
+_Say_: "notification"
+_Avoid_: alert, toast (a toast is short-lived on-screen feedback, not a Notification)
+
+**Toast**:
+Short-lived on-screen feedback. A toast can announce a new Notification, but it is not the Notification: dismissing the toast or letting it fade doesn't read or remove the Notification, which stays in the Inbox.
+_In code_: `sonner`
+
+**Inbox**:
+The in-app list of a user's Notifications. Every Notification lands in the Inbox.
+_Avoid_: feed, notification center, bell
+
+**Channel**:
+A way a Notification reaches a user: the Inbox, push, or email. The Inbox is always one of them.
+_Avoid_: medium, transport
