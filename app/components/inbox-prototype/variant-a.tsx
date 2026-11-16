@@ -43,7 +43,7 @@ export function Overlay() {
           action: { label: "View", onClick: () => open(item) },
         }),
       (count, openInbox) =>
-        toast(`You have ${count} new notifications`, {
+        toast(`You have ${count} more new notification${count === 1 ? "" : "s"}`, {
           duration: 5000,
           action: { label: "Open inbox", onClick: openInbox },
         }),
