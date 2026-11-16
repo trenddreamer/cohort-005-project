@@ -4,14 +4,19 @@ import type { Db } from "~/db/types";
 import { MAX_COMMENT_LENGTH, MIN_COMMENT_LENGTH } from "~/lib/comments";
 import { excerpt } from "~/lib/excerpt";
 import { notify, type Notifier } from "~/lib/notifier.server";
-import type { NotificationUser } from "~/lib/notifications";
+import { toNotificationUser, type NotificationUser } from "~/lib/notifications";
+
+export type CreateCommentResult =
+  | { ok: true; comment: typeof schema.comments.$inferSelect }
+  | { ok: false; error: string };
 
 /**
  * Creates a comment, or a reply when `parentId` is set, then sends the
  * Notification: `comment-reply` to the top-level comment's author, or
  * `lesson-comment` to the course's instructor. The commenter is never
- * notified of their own comment. Throws an `Error` with a displayable message
- * when the input is invalid. A Notifier that fails does not fail the comment.
+ * notified of their own comment. Invalid input comes back as
+ * `{ ok: false, error }` with a displayable message, and nothing is saved or
+ * sent. A Notifier that fails does not fail the comment.
  */
 export async function createComment(
   db: Db,
@@ -20,15 +25,16 @@ export async function createComment(
   lessonId: number,
   parentId: number | null,
   body: string
-) {
+): Promise<CreateCommentResult> {
   const trimmed = body.trim();
   if (trimmed.length < MIN_COMMENT_LENGTH) {
-    throw new Error("Comment cannot be empty");
+    return { ok: false, error: "Comment cannot be empty" };
   }
   if (trimmed.length > MAX_COMMENT_LENGTH) {
-    throw new Error(
-      `Comment must be ${MAX_COMMENT_LENGTH} characters or fewer`
-    );
+    return {
+      ok: false,
+      error: `Comment must be ${MAX_COMMENT_LENGTH} characters or fewer`,
+    };
   }
 
   const lesson = db
@@ -44,23 +50,27 @@ export async function createComment(
     .where(eq(schema.lessons.id, lessonId))
     .get();
   if (!lesson) {
-    throw new Error("Lesson not found");
+    return { ok: false, error: "Lesson not found" };
   }
 
+  let parent: typeof schema.comments.$inferSelect | undefined;
   if (parentId !== null) {
-    const parent = db
+    parent = db
       .select()
       .from(schema.comments)
       .where(eq(schema.comments.id, parentId))
       .get();
     if (!parent) {
-      throw new Error("Parent comment not found");
+      return { ok: false, error: "Parent comment not found" };
     }
     if (parent.lessonId !== lessonId) {
-      throw new Error("Parent comment belongs to a different lesson");
+      return {
+        ok: false,
+        error: "Parent comment belongs to a different lesson",
+      };
     }
     if (parent.parentId !== null) {
-      throw new Error("Replies can only be one level deep");
+      return { ok: false, error: "Replies can only be one level deep" };
     }
   }
 
@@ -71,15 +81,10 @@ export async function createComment(
     .get();
 
   const actor = getUser(db, userId);
-  if (!actor) return comment;
+  if (!actor) return { ok: true, comment };
 
-  if (parentId !== null) {
-    const parentAuthor = db
-      .select({ userId: schema.comments.userId })
-      .from(schema.comments)
-      .where(eq(schema.comments.id, parentId))
-      .get();
-    const recipient = parentAuthor && getUser(db, parentAuthor.userId);
+  if (parent) {
+    const recipient = getUser(db, parent.userId);
     if (recipient && recipient.id !== actor.id) {
       await notify(notifier, {
         kind: "comment-reply",
@@ -113,17 +118,14 @@ export async function createComment(
     }
   }
 
-  return comment;
+  return { ok: true, comment };
 }
 
 function getUser(db: Db, userId: number): NotificationUser | undefined {
-  return db
-    .select({
-      id: schema.users.id,
-      name: schema.users.name,
-      avatarUrl: schema.users.avatarUrl,
-    })
+  const user = db
+    .select()
     .from(schema.users)
     .where(eq(schema.users.id, userId))
     .get();
+  return user && toNotificationUser(user);
 }

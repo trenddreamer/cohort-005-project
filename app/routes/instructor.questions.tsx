@@ -168,20 +168,16 @@ export async function action({ request }: Route.ActionArgs) {
   // instructor, or an admin.
   const access = await requireStaff(request, course.courseId);
 
-  try {
-    await createComment(
-      db,
-      getNotifier(),
-      access.userId!,
-      question.lessonId,
-      question.id,
-      parsed.data.body
-    );
-  } catch (error) {
-    if (error instanceof Error) {
-      return { ok: false, error: error.message };
-    }
-    throw error;
+  const result = await createComment(
+    db,
+    getNotifier(),
+    access.userId!,
+    question.lessonId,
+    question.id,
+    parsed.data.body
+  );
+  if (!result.ok) {
+    return { ok: false, error: result.error };
   }
 
   return { ok: true };

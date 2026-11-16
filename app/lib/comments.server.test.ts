@@ -1,6 +1,8 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import * as schema from "~/db/schema";
 import { createComment } from "~/lib/comments.server";
+import type { Notifier } from "~/lib/notifier.server";
+import { MAX_COMMENT_LENGTH } from "~/lib/comments";
 import { createRecordingNotifier } from "~/test/recording-notifier";
 import { createTestDb, seedBaseData } from "~/test/setup";
 
@@ -23,6 +25,26 @@ beforeEach(() => {
     .get().id;
 });
 
+/** Creates a comment that is expected to be valid. */
+async function post(
+  notifier: Notifier,
+  userId: number,
+  inLessonId: number,
+  parentId: number | null,
+  body: string
+) {
+  const result = await createComment(
+    db,
+    notifier,
+    userId,
+    inLessonId,
+    parentId,
+    body
+  );
+  if (!result.ok) throw new Error(result.error);
+  return result.comment;
+}
+
 function addLearner(name: string) {
   return db
     .insert(schema.users)
@@ -38,8 +60,7 @@ function addLearner(name: string) {
 describe("createComment: replies", () => {
   it("sends comment-reply to the top-level comment's author", async () => {
     const notifier = createRecordingNotifier();
-    const question = await createComment(
-      db,
+    const question = await post(
       notifier,
       base.user.id,
       lessonId,
@@ -48,8 +69,7 @@ describe("createComment: replies", () => {
     );
     notifier.sent.length = 0;
 
-    const reply = await createComment(
-      db,
+    const reply = await post(
       notifier,
       base.instructor.id,
       lessonId,
@@ -79,8 +99,7 @@ describe("createComment: replies", () => {
 
   it("sends nothing when a learner replies in their own thread", async () => {
     const notifier = createRecordingNotifier();
-    const question = await createComment(
-      db,
+    const question = await post(
       notifier,
       base.user.id,
       lessonId,
@@ -88,38 +107,23 @@ describe("createComment: replies", () => {
       "Question"
     );
     notifier.sent.length = 0;
-    await createComment(
-      db,
-      notifier,
-      base.user.id,
-      lessonId,
-      question.id,
-      "Me again"
-    );
+    await post(notifier, base.user.id, lessonId, question.id, "Me again");
     expect(notifier.sent).toEqual([]);
   });
 
   it("notifies only the top-level author, not the instructor or other repliers", async () => {
     const notifier = createRecordingNotifier();
     const other = addLearner("Other");
-    const question = await createComment(
-      db,
+    const question = await post(
       notifier,
       base.user.id,
       lessonId,
       null,
       "Question"
     );
-    await createComment(db, notifier, other.id, lessonId, question.id, "First");
+    await post(notifier, other.id, lessonId, question.id, "First");
     notifier.sent.length = 0;
-    await createComment(
-      db,
-      notifier,
-      base.instructor.id,
-      lessonId,
-      question.id,
-      "Answer"
-    );
+    await post(notifier, base.instructor.id, lessonId, question.id, "Answer");
     expect(notifier.sent.map((n) => [n.kind, n.recipientIds])).toEqual([
       ["comment-reply", [base.user.id]],
     ]);
@@ -129,8 +133,7 @@ describe("createComment: replies", () => {
 describe("createComment: top-level comments", () => {
   it("sends lesson-comment to the course's instructor", async () => {
     const notifier = createRecordingNotifier();
-    const comment = await createComment(
-      db,
+    const comment = await post(
       notifier,
       base.user.id,
       lessonId,
@@ -156,21 +159,13 @@ describe("createComment: top-level comments", () => {
 
   it("sends nothing when the instructor comments on their own Lesson", async () => {
     const notifier = createRecordingNotifier();
-    await createComment(
-      db,
-      notifier,
-      base.instructor.id,
-      lessonId,
-      null,
-      "Note"
-    );
+    await post(notifier, base.instructor.id, lessonId, null, "Note");
     expect(notifier.sent).toEqual([]);
   });
 
   it("keeps the excerpt to plain text of about 140 characters", async () => {
     const notifier = createRecordingNotifier();
-    await createComment(
-      db,
+    await post(
       notifier,
       base.user.id,
       lessonId,
@@ -187,28 +182,53 @@ describe("createComment: failures", () => {
   it("still posts the comment when the Notifier throws", async () => {
     const spy = vi.spyOn(console, "error").mockImplementation(() => {});
     const notifier = createRecordingNotifier({ failWith: new Error("down") });
-    const comment = await createComment(
-      db,
-      notifier,
-      base.user.id,
-      lessonId,
-      null,
-      "Hello"
-    );
+    const comment = await post(notifier, base.user.id, lessonId, null, "Hello");
     expect(comment.body).toBe("Hello");
     expect(db.select().from(schema.comments).all()).toHaveLength(1);
     spy.mockRestore();
   });
 
-  it("rejects bad input without saving or sending", async () => {
+  it("returns the message for bad input, without saving or sending", async () => {
     const notifier = createRecordingNotifier();
-    await expect(
-      createComment(db, notifier, base.user.id, lessonId, null, "   ")
-    ).rejects.toThrow("Comment cannot be empty");
-    await expect(
-      createComment(db, notifier, base.user.id, 9999, null, "Hi")
-    ).rejects.toThrow("Lesson not found");
+    const results = [
+      await createComment(db, notifier, base.user.id, lessonId, null, "   "),
+      await createComment(db, notifier, base.user.id, 9999, null, "Hi"),
+      await createComment(
+        db,
+        notifier,
+        base.user.id,
+        lessonId,
+        null,
+        "x".repeat(MAX_COMMENT_LENGTH + 1)
+      ),
+      await createComment(db, notifier, base.user.id, lessonId, 9999, "Hi"),
+    ];
+    expect(results).toEqual([
+      { ok: false, error: "Comment cannot be empty" },
+      { ok: false, error: "Lesson not found" },
+      {
+        ok: false,
+        error: `Comment must be ${MAX_COMMENT_LENGTH} characters or fewer`,
+      },
+      { ok: false, error: "Parent comment not found" },
+    ]);
     expect(db.select().from(schema.comments).all()).toEqual([]);
     expect(notifier.sent).toEqual([]);
+  });
+
+  it("refuses a reply to a reply", async () => {
+    const notifier = createRecordingNotifier();
+    const question = await post(notifier, base.user.id, lessonId, null, "Q");
+    const reply = await post(
+      notifier,
+      base.user.id,
+      lessonId,
+      question.id,
+      "R"
+    );
+
+    expect(
+      await createComment(db, notifier, base.user.id, lessonId, reply.id, "RR")
+    ).toEqual({ ok: false, error: "Replies can only be one level deep" });
   });
 });
