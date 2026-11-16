@@ -4,6 +4,11 @@ import { cn } from "~/lib/utils";
 import { UserRole } from "~/db/schema";
 import { UserAvatar } from "~/components/user-avatar";
 import {
+  InboxHeaderSlot,
+  InboxNavSlot,
+  InboxFooterSlot,
+} from "~/components/inbox-prototype"; // PROTOTYPE #17
+import {
   BookOpen,
   ChartColumn,
   LayoutDashboard,
@@ -140,9 +145,11 @@ export function Sidebar({
         <NavLink to="/" className="text-lg font-bold tracking-tight">
           Cadence
         </NavLink>
+        {currentUser && <InboxHeaderSlot />}
       </div>
 
       <nav className="flex-1 space-y-1 p-3">
+        {currentUser && <InboxNavSlot />}
         {navItems
           .filter((item) => isVisible(item, currentUserRole))
           .map((item) => (
@@ -242,6 +249,7 @@ export function Sidebar({
                 {currentUser.role}
               </div>
             </div>
+            <InboxFooterSlot />
             <NavLink
               to="/settings"
               title="Settings"
