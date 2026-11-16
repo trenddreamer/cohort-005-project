@@ -1,14 +1,16 @@
 // PROTOTYPE (throwaway, #17). Variant A, "Bell popover": a bell in the sidebar
 // header opens a compact dropdown list beside the sidebar. Plain sonner toasts.
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router";
-import { Bell, BellOff, Check } from "lucide-react";
+import { Bell, BellOff, Check, Loader2 } from "lucide-react";
 import { toast } from "sonner";
 import { cn } from "~/lib/utils";
 import { plainExcerpt, timeAgo, useInbox } from "./store";
 import { ItemAvatar, UnreadBadge } from "./shared";
 
 export const name = "Bell popover";
+
+const PAGE_SIZE = 10;
 
 export function HeaderSlot() {
   const { unreadCount, isOpen, setOpen } = useInbox();
@@ -64,6 +66,34 @@ export function Overlay() {
     return () => document.removeEventListener("mousedown", onDown);
   }, [inbox.isOpen, inbox.setOpen]);
 
+  // Infinite scroll, simulated: show one "page" of PAGE_SIZE, and load the
+  // next page (with a short fake network delay) when the bottom row scrolls
+  // into view. The real Inbox would fetch Knock's next feed page instead.
+  const [pages, setPages] = useState(1);
+  const sentinelRef = useRef<HTMLLIElement>(null);
+  const shownCount = pages * PAGE_SIZE;
+  const hasMore = inbox.items.length > shownCount;
+
+  useEffect(() => {
+    if (!inbox.isOpen) setPages(1);
+  }, [inbox.isOpen]);
+
+  useEffect(() => {
+    const el = sentinelRef.current;
+    if (!el || !hasMore) return;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const observer = new IntersectionObserver(([entry]) => {
+      if (entry.isIntersecting && !timer) {
+        timer = setTimeout(() => setPages((p) => p + 1), 700);
+      }
+    });
+    observer.observe(el);
+    return () => {
+      observer.disconnect();
+      clearTimeout(timer);
+    };
+  }, [hasMore, pages, inbox.isOpen]);
+
   if (!inbox.isOpen) return null;
 
   return (
@@ -94,7 +124,7 @@ export function Overlay() {
         </div>
       ) : (
         <ul className="overflow-y-auto">
-          {inbox.items.map((item) => (
+          {inbox.items.slice(0, shownCount).map((item) => (
             <li
               key={item.id}
               className="group relative border-b last:border-b-0"
@@ -145,6 +175,19 @@ export function Overlay() {
               )}
             </li>
           ))}
+          {hasMore ? (
+            <li
+              ref={sentinelRef}
+              className="flex items-center justify-center gap-2 py-4 text-xs text-muted-foreground"
+            >
+              <Loader2 className="size-3.5 animate-spin" /> Loading older
+              notifications…
+            </li>
+          ) : (
+            <li className="py-4 text-center text-xs text-muted-foreground/70">
+              That's all your notifications
+            </li>
+          )}
         </ul>
       )}
     </div>

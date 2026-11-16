@@ -129,7 +129,18 @@ function seed(): InboxItem[] {
       insertedAt: minutesAgo(60 * 24 * 9),
       readAt: minutesAgo(60 * 24 * 8),
     },
+    ...olderHistory(35),
   ];
+}
+
+/** Older, already-read Notifications so infinite scroll has something to load. */
+function olderHistory(count: number): InboxItem[] {
+  return Array.from({ length: count }, (_, i) => ({
+    ...arrivals[i % arrivals.length],
+    id: `old-${i}`,
+    insertedAt: minutesAgo(60 * 24 * (10 + i * 2)),
+    readAt: minutesAgo(60 * 24 * (10 + i * 2) - 60),
+  }));
 }
 
 const arrivals: Omit<InboxItem, "id" | "insertedAt" | "readAt">[] = [
