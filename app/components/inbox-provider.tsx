@@ -30,6 +30,9 @@ type InboxContextValue = {
   isOpen: boolean;
   setOpen(open: boolean): void;
   markAsRead(id: string): void;
+  markAllAsRead(): void;
+  /** Loads the next 10 older Notifications. */
+  fetchNextPage(): void;
   /** Subscribe to Notifications arriving live. Returns an unsubscribe. */
   onArrival(handler: (items: InboxItem[]) => void): () => void;
 };
@@ -119,6 +122,14 @@ export function InboxProvider({
     connectionRef.current?.markAsRead(id);
   }, []);
 
+  const markAllAsRead = useCallback(() => {
+    connectionRef.current?.markAllAsRead();
+  }, []);
+
+  const fetchNextPage = useCallback(() => {
+    connectionRef.current?.fetchNextPage();
+  }, []);
+
   const onArrival = useCallback((handler: (items: InboxItem[]) => void) => {
     arrivalHandlers.current.add(handler);
     return () => void arrivalHandlers.current.delete(handler);
@@ -131,9 +142,20 @@ export function InboxProvider({
       isOpen,
       setOpen,
       markAsRead,
+      markAllAsRead,
+      fetchNextPage,
       onArrival,
     }),
-    [connected, state, isOpen, setOpen, markAsRead, onArrival]
+    [
+      connected,
+      state,
+      isOpen,
+      setOpen,
+      markAsRead,
+      markAllAsRead,
+      fetchNextPage,
+      onArrival,
+    ]
   );
 
   return (

@@ -30,13 +30,26 @@ export type InboxState = {
   items: InboxItem[];
   unreadCount: number;
   status: InboxStatus;
+  /** True while Knock has an older page to give (its cursor is not null). */
+  hasMore: boolean;
 };
 
 export const EMPTY_INBOX_STATE: InboxState = {
   items: [],
   unreadCount: 0,
   status: "ready",
+  hasMore: false,
 };
+
+/**
+ * The line at the bottom of the list: "loading" is "Loading older
+ * notifications…", "end" is "That's all your notifications", "none" is
+ * nothing (empty Inbox, or the first page is still loading).
+ */
+export function inboxFooter(state: InboxState): "loading" | "end" | "none" {
+  if (state.items.length === 0) return "none";
+  return state.hasMore ? "loading" : "end";
+}
 
 export type InboxConnectionOptions = {
   /** Cadence user ID. */
@@ -60,6 +73,10 @@ export type InboxConnection = {
   refresh(): void;
   /** Marks one Notification read. */
   markAsRead(id: string): void;
+  /** Marks every Notification read. */
+  markAllAsRead(): void;
+  /** Loads the next 10 older Notifications. Does nothing if none, or busy. */
+  fetchNextPage(): void;
   /**
    * Calls the handler with Notifications that arrive live (not the first
    * page, not older pages). Returns an unsubscribe function.
@@ -93,6 +110,7 @@ function toInboxState(raw: FeedStoreState): InboxState {
     items: raw.items.flatMap((item) => toInboxItem(item) ?? []),
     unreadCount: raw.metadata.unread_count,
     status: raw.networkStatus,
+    hasMore: raw.pageInfo.after !== null,
   };
 }
 
@@ -140,6 +158,12 @@ export function connectInbox(options: InboxConnectionOptions): InboxConnection {
     markAsRead(id) {
       const item = feed.store.getState().items.find((i) => i.id === id);
       if (item) void feed.markAsRead(item);
+    },
+    markAllAsRead: () => void feed.markAllAsRead(),
+    fetchNextPage() {
+      const { networkStatus, pageInfo } = feed.store.getState();
+      if (networkStatus === "ready" && pageInfo.after)
+        void feed.fetchNextPage();
     },
     onArrival(handler) {
       arrivalHandlers.add(handler);

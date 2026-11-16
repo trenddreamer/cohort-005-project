@@ -6,6 +6,8 @@ import {
   BellOff,
   CircleCheck,
   CircleX,
+  Check,
+  Loader2,
   MessageSquare,
   MessageSquareReply,
   ReceiptText,
@@ -15,7 +17,7 @@ import {
 import { cn, formatRelativeTime } from "~/lib/utils";
 import { UserAvatar } from "~/components/user-avatar";
 import { useInbox } from "~/components/inbox-provider";
-import type { InboxItem } from "~/lib/inbox-client";
+import { inboxFooter, type InboxItem } from "~/lib/inbox-client";
 import type { NotificationKind } from "~/lib/notifications";
 
 const kindMeta: Record<NotificationKind, { icon: ElementType; tone: string }> =
@@ -131,52 +133,101 @@ function InboxRowButton({ item }: { item: InboxItem }) {
   }
 
   return (
-    <button
-      type="button"
-      onClick={open}
-      className={cn(
-        "flex w-full gap-3 px-4 py-3 text-left transition-colors hover:bg-muted/60",
-        unread && "bg-primary/5"
-      )}
-    >
-      <RowAvatar item={item} />
-      <div className="min-w-0 flex-1">
-        <p
-          className={cn(
-            "text-sm leading-snug",
-            unread ? "font-semibold" : "text-muted-foreground"
-          )}
-        >
-          {row.title}
-        </p>
-        {row.detail && (
-          <p className="mt-0.5 text-xs text-muted-foreground">{row.detail}</p>
+    <div className="group relative">
+      <button
+        type="button"
+        onClick={open}
+        className={cn(
+          "flex w-full gap-3 px-4 py-3 text-left transition-colors hover:bg-muted/60",
+          unread && "bg-primary/5"
         )}
-        {row.excerpt && (
-          <p className="mt-1 line-clamp-2 text-xs text-muted-foreground">
-            “{row.excerpt}”
+      >
+        <RowAvatar item={item} />
+        <div className="min-w-0 flex-1">
+          <p
+            className={cn(
+              "text-sm leading-snug",
+              unread ? "font-semibold" : "text-muted-foreground"
+            )}
+          >
+            {row.title}
           </p>
+          {row.detail && (
+            <p className="mt-0.5 text-xs text-muted-foreground">{row.detail}</p>
+          )}
+          {row.excerpt && (
+            <p className="mt-1 line-clamp-2 text-xs text-muted-foreground">
+              “{row.excerpt}”
+            </p>
+          )}
+          <p
+            className="mt-1 text-[11px] text-muted-foreground/70"
+            suppressHydrationWarning
+          >
+            {formatRelativeTime(item.insertedAt)}
+          </p>
+        </div>
+        {unread && (
+          <span
+            aria-label="Unread"
+            className="mt-1.5 size-2 shrink-0 rounded-full bg-primary"
+          />
         )}
-        <p
-          className="mt-1 text-[11px] text-muted-foreground/70"
-          suppressHydrationWarning
-        >
-          {formatRelativeTime(item.insertedAt)}
-        </p>
-      </div>
+      </button>
       {unread && (
-        <span
-          aria-label="Unread"
-          className="mt-1.5 size-2 shrink-0 rounded-full bg-primary"
-        />
+        <button
+          type="button"
+          aria-label="Mark as read"
+          title="Mark as read"
+          onClick={() => markAsRead(item.id)}
+          className="absolute right-3 top-2 hidden rounded-md border bg-background p-1 text-muted-foreground shadow-sm hover:text-foreground focus-visible:block group-hover:block"
+        >
+          <Check className="size-3.5" />
+        </button>
       )}
-    </button>
+    </div>
+  );
+}
+
+/** The end of the list: loads older Notifications when it scrolls into view. */
+function InboxListFooter() {
+  const { state, fetchNextPage } = useInbox();
+  const footer = inboxFooter(state);
+  const sentinelRef = useRef<HTMLLIElement>(null);
+
+  useEffect(() => {
+    const sentinel = sentinelRef.current;
+    if (footer !== "loading" || !sentinel) return;
+    const observer = new IntersectionObserver((entries) => {
+      if (entries.some((entry) => entry.isIntersecting)) fetchNextPage();
+    });
+    observer.observe(sentinel);
+    return () => observer.disconnect();
+    // Re-observe after each page: the sentinel may still be in view, and a
+    // fresh observer reports its state again.
+  }, [footer, state.items.length, state.status, fetchNextPage]);
+
+  if (footer === "none") return null;
+  if (footer === "end") {
+    return (
+      <li className="py-4 text-center text-xs text-muted-foreground/70">
+        That's all your notifications
+      </li>
+    );
+  }
+  return (
+    <li
+      ref={sentinelRef}
+      className="flex items-center justify-center gap-2 py-4 text-xs text-muted-foreground"
+    >
+      <Loader2 className="size-3.5 animate-spin" /> Loading older notifications…
+    </li>
   );
 }
 
 /** The dropdown beside the sidebar. Renders nothing while closed. */
 export function InboxPanel() {
-  const { state, isOpen, setOpen } = useInbox();
+  const { state, isOpen, setOpen, markAllAsRead } = useInbox();
   const panelRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -204,6 +255,15 @@ export function InboxPanel() {
     >
       <div className="flex items-center border-b px-4 py-3">
         <h2 className="text-sm font-semibold">Notifications</h2>
+        {state.unreadCount > 0 && (
+          <button
+            type="button"
+            onClick={markAllAsRead}
+            className="ml-auto text-xs font-medium text-primary hover:underline"
+          >
+            Mark all as read
+          </button>
+        )}
       </div>
       {state.items.length === 0 ? (
         <div className="flex flex-col items-center gap-2 px-6 py-12 text-center">
@@ -221,6 +281,7 @@ export function InboxPanel() {
               <InboxRowButton item={item} />
             </li>
           ))}
+          <InboxListFooter />
         </ul>
       )}
     </div>

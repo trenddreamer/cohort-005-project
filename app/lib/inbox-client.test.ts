@@ -1,6 +1,11 @@
 import { describe, it, expect } from "vitest";
 import type { FeedItem } from "@knocklabs/client";
-import { toInboxItem } from "./inbox-client";
+import {
+  EMPTY_INBOX_STATE,
+  inboxFooter,
+  toInboxItem,
+  type InboxState,
+} from "./inbox-client";
 
 function feedItem(overrides: Partial<FeedItem>): FeedItem {
   return {
@@ -78,5 +83,32 @@ describe("toInboxItem", () => {
         })
       )
     ).toBeNull();
+  });
+});
+
+describe("inboxFooter", () => {
+  const item = toInboxItem(feedItem({}))!;
+  const state = (overrides: Partial<InboxState>): InboxState => ({
+    ...EMPTY_INBOX_STATE,
+    items: [item],
+    ...overrides,
+  });
+
+  it("shows the loading line while there is more to load", () => {
+    expect(inboxFooter(state({ hasMore: true, status: "ready" }))).toBe(
+      "loading"
+    );
+    expect(inboxFooter(state({ hasMore: true, status: "fetchMore" }))).toBe(
+      "loading"
+    );
+  });
+
+  it("shows 'that's all' only once nothing more can load", () => {
+    expect(inboxFooter(state({ hasMore: false, status: "ready" }))).toBe("end");
+  });
+
+  it("shows nothing for an empty Inbox or the first load", () => {
+    expect(inboxFooter(EMPTY_INBOX_STATE)).toBe("none");
+    expect(inboxFooter(state({ items: [], hasMore: true }))).toBe("none");
   });
 });
