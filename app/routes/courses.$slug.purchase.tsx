@@ -250,12 +250,15 @@ export async function action({ params, request }: Route.ActionArgs) {
     if (isUserEnrolled(currentUserId, course.id)) {
       throw redirect(`/courses/${slug}`);
     }
-    const result = await buyCourse(db, getNotifier(), {
-      userId: currentUserId,
-      courseId: course.id,
-      amountPaid: pppPrice,
+    const result = await buyCourse(
+      db,
+      getNotifier(),
+      currentUserId,
+      course.id,
+      pppPrice,
       country,
-    });
+      new Date()
+    );
     if (!result.ok) {
       throw data(result.error, { status: 400 });
     }
@@ -264,13 +267,15 @@ export async function action({ params, request }: Route.ActionArgs) {
 
   // Team purchase — user does NOT get enrolled themselves
   const { quantity } = parsed.data;
-  buyTeamSeats(db, {
-    userId: currentUserId,
-    courseId: course.id,
-    amountPaid: pppPrice * quantity,
+  buyTeamSeats(
+    db,
+    currentUserId,
+    course.id,
+    pppPrice * quantity,
     country,
     quantity,
-  });
+    new Date()
+  );
   throw redirect(`/team`);
 }
 

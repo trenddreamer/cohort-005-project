@@ -1,10 +1,19 @@
-import { and, asc, desc, eq, inArray, isNotNull, isNull, sql } from "drizzle-orm";
+import {
+  and,
+  asc,
+  desc,
+  eq,
+  inArray,
+  isNotNull,
+  isNull,
+  sql,
+} from "drizzle-orm";
 import { alias } from "drizzle-orm/sqlite-core";
 import * as schema from "~/db/schema";
 import type { Db } from "~/db/types";
 import { excerpt } from "~/lib/excerpt";
 import { notify, type Notifier } from "~/lib/notifier.server";
-import type { NotificationUser } from "~/lib/notifications";
+import { toNotificationUser, type NotificationUser } from "~/lib/notifications";
 
 // ─── Eligibility limits (names from GLOSSARY.md) ───
 
@@ -124,11 +133,7 @@ export function getCompletionFraction(
 // ─── Purchases and Refund Requests ───
 
 /** The learner's most recent purchase of a course, if any. */
-export function getLatestPurchase(
-  db: Db,
-  userId: number,
-  courseId: number
-) {
+export function getLatestPurchase(db: Db, userId: number, courseId: number) {
   return db
     .select()
     .from(schema.purchases)
@@ -400,11 +405,7 @@ function revokeAccessFromPurchase(
 type Approval = { amountRefunded: number; revokedMemberIds: number[] };
 
 // Runs after the request has moved from Open to Approved, in that transaction.
-function recordApproval(
-  tx: Db,
-  refundRequestId: number,
-  now: Date
-): Approval {
+function recordApproval(tx: Db, refundRequestId: number, now: Date): Approval {
   const purchase = tx
     .select({
       id: schema.purchases.id,
@@ -441,13 +442,22 @@ function formatAmountRefunded(cents: number): string {
   return `$${(cents / 100).toFixed(2)}`;
 }
 
-/** What the transaction hands out so Notifications can be sent after it commits. */
+/**
+ * What the transaction hands out so Notifications can be sent after it
+ * commits. A union on status: only an Approved request has an Amount Refunded
+ * and members who lost access, so a Declined one can't carry them.
+ */
 type ResolvedRefundRequest = {
   buyer: NotificationUser;
   course: { id: number; title: string; slug: string };
-  /** Set when approving: the Amount Refunded and the members who lost access. */
-  approval?: { amountRefunded: number; revokedMembers: NotificationUser[] };
-};
+} & (
+  | { status: schema.RefundStatus.Declined }
+  | {
+      status: schema.RefundStatus.Approved;
+      amountRefunded: number;
+      revokedMembers: NotificationUser[];
+    }
+);
 
 type ResolveOutcome =
   | { ok: true; resolved: ResolvedRefundRequest }
@@ -456,15 +466,12 @@ type ResolveOutcome =
 function loadNotificationUsers(tx: Db, userIds: number[]): NotificationUser[] {
   if (userIds.length === 0) return [];
   return tx
-    .select({
-      id: schema.users.id,
-      name: schema.users.name,
-      avatarUrl: schema.users.avatarUrl,
-    })
+    .select()
     .from(schema.users)
     .where(inArray(schema.users.id, userIds))
     .orderBy(asc(schema.users.id))
-    .all();
+    .all()
+    .map(toNotificationUser);
 }
 
 // The buyer and the course of a Refund Request, loaded for its Notifications.
@@ -475,12 +482,12 @@ function loadResolvedRefundRequest(
 ): ResolvedRefundRequest {
   const row = tx
     .select({
-      buyerId: schema.users.id,
-      buyerName: schema.users.name,
-      buyerAvatarUrl: schema.users.avatarUrl,
-      courseId: schema.courses.id,
-      courseTitle: schema.courses.title,
-      courseSlug: schema.courses.slug,
+      buyer: schema.users,
+      course: {
+        id: schema.courses.id,
+        title: schema.courses.title,
+        slug: schema.courses.slug,
+      },
     })
     .from(schema.refunds)
     .innerJoin(
@@ -495,17 +502,16 @@ function loadResolvedRefundRequest(
   if (!row) {
     throw new Error(`Refund request ${refundRequestId} has no purchase.`);
   }
+  const buyer = toNotificationUser(row.buyer);
+  if (!approval) {
+    return { buyer, course: row.course, status: schema.RefundStatus.Declined };
+  }
   return {
-    buyer: {
-      id: row.buyerId,
-      name: row.buyerName,
-      avatarUrl: row.buyerAvatarUrl,
-    },
-    course: { id: row.courseId, title: row.courseTitle, slug: row.courseSlug },
-    approval: approval && {
-      amountRefunded: approval.amountRefunded,
-      revokedMembers: loadNotificationUsers(tx, approval.revokedMemberIds),
-    },
+    buyer,
+    course: row.course,
+    status: schema.RefundStatus.Approved,
+    amountRefunded: approval.amountRefunded,
+    revokedMembers: loadNotificationUsers(tx, approval.revokedMemberIds),
   };
 }
 
@@ -574,17 +580,17 @@ async function resolveRefundRequest(
 
   if (!outcome.ok) return outcome;
 
-  await sendResolutionNotifications(notifier, status, outcome.resolved);
+  await sendResolutionNotifications(notifier, outcome.resolved);
   return { ok: true };
 }
 
 // Committed by now.
 async function sendResolutionNotifications(
   notifier: Notifier,
-  status: schema.RefundStatus.Approved | schema.RefundStatus.Declined,
-  { buyer, course, approval }: ResolvedRefundRequest
+  resolved: ResolvedRefundRequest
 ) {
-  switch (status) {
+  const { buyer, course } = resolved;
+  switch (resolved.status) {
     case schema.RefundStatus.Declined:
       await notify(notifier, {
         kind: "refund-request-declined",
@@ -593,20 +599,19 @@ async function sendResolutionNotifications(
       });
       return;
     case schema.RefundStatus.Approved:
-      if (!approval) return;
       await notify(notifier, {
         kind: "refund-request-approved",
         recipients: [buyer],
         data: {
           course_title: course.title,
           course_slug: course.slug,
-          amount: formatAmountRefunded(approval.amountRefunded),
+          amount: formatAmountRefunded(resolved.amountRefunded),
         },
       });
-      if (approval.revokedMembers.length > 0) {
+      if (resolved.revokedMembers.length > 0) {
         await notify(notifier, {
           kind: "access-ended",
-          recipients: approval.revokedMembers,
+          recipients: resolved.revokedMembers,
           data: { course_title: course.title, course_slug: course.slug },
         });
       }
@@ -676,16 +681,12 @@ export type OpenRefundRequestResult =
 export async function openRefundRequest(
   db: Db,
   notifier: Notifier,
-  input: {
-    purchase: PurchaseForRefund;
-    learner: NotificationUser;
-    course: { title: string };
-    reason: string;
-    now: Date;
-  }
+  purchase: PurchaseForRefund,
+  learner: NotificationUser,
+  course: { title: string },
+  reason: string,
+  now: Date
 ): Promise<OpenRefundRequestResult> {
-  const { purchase, learner, course, reason, now } = input;
-
   const eligibility = canOpenRefundRequest(db, purchase, learner, now);
   if (!eligibility.eligible) return { ok: false, reason: eligibility.reason };
 
@@ -694,27 +695,21 @@ export async function openRefundRequest(
       purchaseId: purchase.id,
       status: schema.RefundStatus.Requested,
       reason,
+      requestedAt: now.toISOString(),
     })
     .run();
 
   const admins = db
-    .select({
-      id: schema.users.id,
-      name: schema.users.name,
-      avatarUrl: schema.users.avatarUrl,
-    })
+    .select()
     .from(schema.users)
     .where(eq(schema.users.role, schema.UserRole.Admin))
-    .all();
+    .all()
+    .map(toNotificationUser);
 
   await notify(notifier, {
     kind: "open-refund-request",
     recipients: admins,
-    actor: {
-      id: learner.id,
-      name: learner.name,
-      avatarUrl: learner.avatarUrl,
-    },
+    actor: toNotificationUser(learner),
     data: { course_title: course.title, excerpt: excerpt(reason) },
   });
 

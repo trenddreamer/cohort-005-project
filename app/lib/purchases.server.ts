@@ -2,39 +2,8 @@ import crypto from "crypto";
 import { and, eq } from "drizzle-orm";
 import * as schema from "~/db/schema";
 import type { Db } from "~/db/types";
-import type { NotificationUser } from "~/lib/notifications";
-import { notify, type Notifier } from "~/lib/notifier.server";
-
-export function toNotificationUser(
-  user: typeof schema.users.$inferSelect
-): NotificationUser {
-  return { id: user.id, name: user.name, avatarUrl: user.avatarUrl };
-}
-
-/**
- * Tells the course's instructor that `learner` enrolled. Call it only after
- * the Enrollment has committed. The Notifier drops the instructor when they
- * are the learner.
- */
-export async function notifyNewEnrollment(
-  db: Db,
-  notifier: Notifier,
-  learner: typeof schema.users.$inferSelect,
-  course: typeof schema.courses.$inferSelect
-): Promise<void> {
-  const instructor = db
-    .select()
-    .from(schema.users)
-    .where(eq(schema.users.id, course.instructorId))
-    .get();
-  if (!instructor) return;
-  await notify(notifier, {
-    kind: "new-enrollment",
-    recipients: [toNotificationUser(instructor)],
-    actor: toNotificationUser(learner),
-    data: { course_title: course.title, course_id: course.id },
-  });
-}
+import { notifyNewEnrollment } from "~/lib/enrollment-notifications.server";
+import type { Notifier } from "~/lib/notifier.server";
 
 export type BuyCourseResult =
   | { ok: true; enrollment: typeof schema.enrollments.$inferSelect }
@@ -47,15 +16,12 @@ export type BuyCourseResult =
 export async function buyCourse(
   db: Db,
   notifier: Notifier,
-  input: {
-    userId: number;
-    courseId: number;
-    amountPaid: number;
-    country: string | null;
-  }
+  userId: number,
+  courseId: number,
+  amountPaid: number,
+  country: string | null,
+  now: Date
 ): Promise<BuyCourseResult> {
-  const { userId, courseId, amountPaid, country } = input;
-
   const result = db.transaction((tx) => {
     const course = tx
       .select()
@@ -89,11 +55,17 @@ export async function buyCourse(
     }
 
     tx.insert(schema.purchases)
-      .values({ userId, courseId, amountPaid, country })
+      .values({
+        userId,
+        courseId,
+        amountPaid,
+        country,
+        createdAt: now.toISOString(),
+      })
       .run();
     const enrollment = tx
       .insert(schema.enrollments)
-      .values({ userId, courseId })
+      .values({ userId, courseId, enrolledAt: now.toISOString() })
       .returning()
       .get();
     return { ok: true as const, enrollment, course, learner };
@@ -112,19 +84,23 @@ export async function buyCourse(
  */
 export function buyTeamSeats(
   db: Db,
-  input: {
-    userId: number;
-    courseId: number;
-    amountPaid: number;
-    country: string | null;
-    quantity: number;
-  }
+  userId: number,
+  courseId: number,
+  amountPaid: number,
+  country: string | null,
+  quantity: number,
+  now: Date
 ) {
-  const { userId, courseId, amountPaid, country, quantity } = input;
   return db.transaction((tx) => {
     const purchase = tx
       .insert(schema.purchases)
-      .values({ userId, courseId, amountPaid, country })
+      .values({
+        userId,
+        courseId,
+        amountPaid,
+        country,
+        createdAt: now.toISOString(),
+      })
       .returning()
       .get();
 

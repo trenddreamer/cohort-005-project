@@ -1,9 +1,7 @@
 import { and, eq } from "drizzle-orm";
+import { notifyNewEnrollment } from "~/lib/enrollment-notifications.server";
 import { notify, type Notifier } from "~/lib/notifier.server";
-import {
-  notifyNewEnrollment,
-  toNotificationUser,
-} from "~/lib/purchases.server";
+import { toNotificationUser } from "~/lib/notifications";
 import * as schema from "~/db/schema";
 import type { Db } from "~/db/types";
 import { SEAT_CODE_VOIDED_MESSAGE } from "~/lib/seat-codes";

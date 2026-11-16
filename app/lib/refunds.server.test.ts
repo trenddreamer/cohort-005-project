@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { createTestDb, seedBaseData } from "~/test/setup";
 import {
   createRecordingNotifier,
@@ -1199,6 +1199,26 @@ describe("approveRefundRequest", () => {
       expect(notifier.sent).toEqual([]);
     });
 
+    it("sends nothing when the approval rolls back", async () => {
+      const admin = addAdmin();
+      const request = openSoloRefundRequest();
+      // Removing access is part of approving: make it fail mid-transaction.
+      db.run(
+        sql`CREATE TRIGGER block_access_removal BEFORE DELETE ON enrollments
+            BEGIN SELECT RAISE(ABORT, 'forced failure'); END`
+      );
+
+      await expect(
+        approveRefundRequest(db, notifier, request.id, admin.id, now)
+      ).rejects.toThrow("forced failure");
+
+      expect(notifier.sent).toEqual([]);
+      expect(findRefundRequest(request.id)).toMatchObject({
+        status: schema.RefundStatus.Requested,
+        amountRefunded: null,
+      });
+    });
+
     it("still approves when the Notifier throws", async () => {
       const admin = addAdmin();
       const request = openSoloRefundRequest();
@@ -1459,13 +1479,15 @@ describe("openRefundRequest", () => {
     learner = base.user,
     purchase = buyCourse("2026-03-01T10:00:00", learner.id)
   ) {
-    return openRefundRequest(db, notifier, {
+    return openRefundRequest(
+      db,
+      notifier,
       purchase,
       learner,
-      course: base.course,
-      reason: text,
-      now,
-    });
+      base.course,
+      text,
+      now
+    );
   }
 
   function savedRequests() {
@@ -1490,6 +1512,12 @@ describe("openRefundRequest", () => {
         data: { course_title: base.course.title, excerpt: reason },
       },
     ]);
+  });
+
+  it("dates the request with the time it is given", async () => {
+    await open(reason);
+
+    expect(savedRequests()[0].requestedAt).toBe(now.toISOString());
   });
 
   it("sends to every admin", async () => {

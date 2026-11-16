@@ -135,13 +135,15 @@ export async function action({ params, request }: Route.ActionArgs) {
     return data({ errors: parsed.errors }, { status: 400 });
   }
 
-  const opened = await openRefundRequest(db, getNotifier(), {
+  const opened = await openRefundRequest(
+    db,
+    getNotifier(),
     purchase,
     learner,
     course,
-    reason: parsed.data.reason,
-    now: new Date(),
-  });
+    parsed.data.reason,
+    new Date()
+  );
 
   if (!opened.ok) {
     const { message, status } = ineligibleResponses[opened.reason];
@@ -155,9 +157,7 @@ export async function action({ params, request }: Route.ActionArgs) {
     amount: refundableAmount,
   });
 
-  console.log(
-    `[email] to=${email.to} subject=${email.subject}\n${email.body}`
-  );
+  console.log(`[email] to=${email.to} subject=${email.subject}\n${email.body}`);
 
   return redirect("/settings");
 }

@@ -39,23 +39,12 @@ function addTeamAdmin(teamId: number, userId: number) {
 }
 
 function buyTeam(buyer = base.user, quantity = 2) {
-  return buyTeamSeats(db, {
-    userId: buyer.id,
-    courseId: base.course.id,
-    amountPaid: 9800,
-    country: null,
-    quantity,
-  });
+  return buyTeamSeats(db, buyer.id, base.course.id, 9800, null, quantity, now);
 }
 
 describe("buyCourse", () => {
   const buy = (userId: number) =>
-    buyCourse(db, notifier, {
-      userId,
-      courseId: base.course.id,
-      amountPaid: 4900,
-      country: "US",
-    });
+    buyCourse(db, notifier, userId, base.course.id, 4900, "US", now);
 
   it("saves the purchase and Enrollment and tells the instructor", async () => {
     const result = await buy(base.user.id);
@@ -71,6 +60,15 @@ describe("buyCourse", () => {
         data: { course_title: "Test Course", course_id: base.course.id },
       },
     ]);
+  });
+
+  it("dates the purchase and the Enrollment with the time it is given", async () => {
+    await buy(base.user.id);
+
+    const [purchase] = db.select().from(schema.purchases).all();
+    const [enrollment] = db.select().from(schema.enrollments).all();
+    expect(purchase.createdAt).toBe(now.toISOString());
+    expect(enrollment.enrolledAt).toBe(now.toISOString());
   });
 
   it("does not notify an instructor who enrolls in their own course", async () => {
@@ -90,12 +88,15 @@ describe("buyCourse", () => {
   });
 
   it("rolls back the purchase and sends nothing when the Enrollment fails", async () => {
-    const result = await buyCourse(db, notifier, {
-      userId: base.user.id,
-      courseId: 9999,
-      amountPaid: 4900,
-      country: "US",
-    });
+    const result = await buyCourse(
+      db,
+      notifier,
+      base.user.id,
+      9999,
+      4900,
+      "US",
+      now
+    );
 
     expect(result.ok).toBe(false);
     expect(db.select().from(schema.purchases).all()).toEqual([]);
@@ -104,12 +105,15 @@ describe("buyCourse", () => {
 
   it("still succeeds when delivery fails", async () => {
     const failing = createRecordingNotifier({ failWith: new Error("down") });
-    const result = await buyCourse(db, failing, {
-      userId: base.user.id,
-      courseId: base.course.id,
-      amountPaid: 4900,
-      country: "US",
-    });
+    const result = await buyCourse(
+      db,
+      failing,
+      base.user.id,
+      base.course.id,
+      4900,
+      "US",
+      now
+    );
     expect(result.ok).toBe(true);
   });
 });
@@ -119,6 +123,7 @@ describe("buyTeamSeats", () => {
     const result = buyTeam();
 
     expect(result.coupons).toHaveLength(2);
+    expect(result.purchase.createdAt).toBe(now.toISOString());
     expect(db.select().from(schema.enrollments).all()).toEqual([]);
     expect(notifier.sent).toEqual([]);
   });
