@@ -3,6 +3,7 @@ import type { Route } from "./+types/layout.app";
 import { Sidebar } from "~/components/sidebar";
 import { DevUI } from "~/components/dev-ui";
 import { InboxProvider } from "~/components/inbox-provider";
+import { InboxToasts } from "~/components/inbox-toasts";
 import { getNotifier, knockConfigFromEnv } from "~/lib/notifier.server";
 import { Toaster } from "sonner";
 import { getCurrentUserId, getDevCountry } from "~/lib/session";
@@ -280,6 +281,7 @@ export default function AppLayout({ loaderData }: Route.ComponentProps) {
           countries={countries}
         />
         <Toaster position="bottom-right" richColors closeButton />
+        <InboxToasts />
       </div>
     </InboxProvider>
   );

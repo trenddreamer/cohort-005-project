@@ -1,4 +1,5 @@
 import { useEffect, useRef, useCallback, useState } from "react";
+import { setVideoPlaying } from "~/lib/video-playing";
 
 declare global {
   interface Window {
@@ -164,16 +165,19 @@ export function YouTubePlayer({
 
             switch (event.data) {
               case window.YT.PlayerState.PLAYING:
+                setVideoPlaying(true);
                 sendTrackingEvent("play", pos);
                 startTracking();
                 updateProgress();
                 break;
               case window.YT.PlayerState.PAUSED:
+                setVideoPlaying(false);
                 sendTrackingEvent("pause", pos);
                 stopTracking();
                 updateProgress();
                 break;
               case window.YT.PlayerState.ENDED:
+                setVideoPlaying(false);
                 sendTrackingEvent("ended", pos);
                 stopTracking();
                 setProgress(100);
@@ -186,6 +190,7 @@ export function YouTubePlayer({
 
     return () => {
       destroyed = true;
+      setVideoPlaying(false);
       stopTracking();
       if (player && typeof player.destroy === "function") {
         player.destroy();
