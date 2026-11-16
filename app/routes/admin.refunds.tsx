@@ -13,6 +13,7 @@ import { AlertTriangle, ReceiptText, Users } from "lucide-react";
 import type { Route } from "./+types/admin.refunds";
 import { db } from "~/db";
 import { RefundStatus, UserRole, users } from "~/db/schema";
+import { getNotifier } from "~/lib/notifier.server";
 import { getCurrentUserId } from "~/lib/session";
 import {
   approveRefundRequest,
@@ -103,12 +104,25 @@ function resolve(
   refundRequestId: number,
   adminUserId: number,
   now: Date
-): ResolveRefundRequestResult {
+): Promise<ResolveRefundRequestResult> {
+  const notifier = getNotifier();
   switch (intent) {
     case "approve":
-      return approveRefundRequest(db, refundRequestId, adminUserId, now);
+      return approveRefundRequest(
+        db,
+        notifier,
+        refundRequestId,
+        adminUserId,
+        now
+      );
     case "decline":
-      return declineRefundRequest(db, refundRequestId, adminUserId, now);
+      return declineRefundRequest(
+        db,
+        notifier,
+        refundRequestId,
+        adminUserId,
+        now
+      );
   }
 }
 
@@ -128,7 +142,12 @@ export async function action({ request }: Route.ActionArgs) {
   }
 
   const { intent, refundRequestId } = parsed.data;
-  const result = resolve(intent, refundRequestId, adminUserId, new Date());
+  const result = await resolve(
+    intent,
+    refundRequestId,
+    adminUserId,
+    new Date()
+  );
   if (result.ok) return { resolved: intent };
 
   switch (result.error) {

@@ -2,6 +2,8 @@ import { and, asc, desc, eq, inArray, isNotNull, isNull, sql } from "drizzle-orm
 import { alias } from "drizzle-orm/sqlite-core";
 import * as schema from "~/db/schema";
 import type { Db } from "~/db/types";
+import { notify, type Notifier } from "~/lib/notifier.server";
+import type { NotificationUser } from "~/lib/notifications";
 
 // ─── Eligibility limits (names from GLOSSARY.md) ───
 
@@ -421,20 +423,71 @@ function recordApproval(tx: Db, refundRequestId: number, now: Date) {
   revokeAccessFromPurchase(tx, purchase, now);
 }
 
+/** What the transaction hands out so Notifications can be sent after it commits. */
+type ResolvedRefundRequest = {
+  buyer: NotificationUser;
+  course: { id: number; title: string; slug: string };
+};
+
+type ResolveOutcome =
+  | { ok: true; resolved: ResolvedRefundRequest }
+  | { ok: false; error: ResolveRefundRequestError };
+
+// The buyer and the course of a Refund Request, loaded for its Notifications.
+function loadResolvedRefundRequest(
+  tx: Db,
+  refundRequestId: number
+): ResolvedRefundRequest {
+  const row = tx
+    .select({
+      buyerId: schema.users.id,
+      buyerName: schema.users.name,
+      buyerAvatarUrl: schema.users.avatarUrl,
+      courseId: schema.courses.id,
+      courseTitle: schema.courses.title,
+      courseSlug: schema.courses.slug,
+    })
+    .from(schema.refunds)
+    .innerJoin(
+      schema.purchases,
+      eq(schema.refunds.purchaseId, schema.purchases.id)
+    )
+    .innerJoin(schema.users, eq(schema.purchases.userId, schema.users.id))
+    .innerJoin(schema.courses, eq(schema.purchases.courseId, schema.courses.id))
+    .where(eq(schema.refunds.id, refundRequestId))
+    .get();
+  // Foreign keys mean this can't happen; throwing rolls the transaction back.
+  if (!row) {
+    throw new Error(`Refund request ${refundRequestId} has no purchase.`);
+  }
+  return {
+    buyer: {
+      id: row.buyerId,
+      name: row.buyerName,
+      avatarUrl: row.buyerAvatarUrl,
+    },
+    course: { id: row.courseId, title: row.courseTitle, slug: row.courseSlug },
+  };
+}
+
 /**
  * Resolves an Open Refund Request in one transaction, behind the guards that
  * Approve and Decline share: only an admin resolves, and only an Open request
  * can be resolved. Approving also records the Amount Refunded and removes
  * access in the same transaction, so a failure leaves the request Open.
+ *
+ * Notifications are sent after the transaction commits, never inside it, and
+ * never when it fails. A Notifier that fails does not fail the resolution.
  */
-function resolveRefundRequest(
+async function resolveRefundRequest(
   db: Db,
+  notifier: Notifier,
   refundRequestId: number,
   actingUserId: number,
   now: Date,
   status: schema.RefundStatus.Approved | schema.RefundStatus.Declined
-): ResolveRefundRequestResult {
-  return db.transaction((tx) => {
+): Promise<ResolveRefundRequestResult> {
+  const outcome = db.transaction((tx): ResolveOutcome => {
     const actingUser = tx
       .select({ role: schema.users.role })
       .from(schema.users)
@@ -473,8 +526,36 @@ function resolveRefundRequest(
       recordApproval(tx, refundRequestId, now);
     }
 
-    return { ok: true };
+    return {
+      ok: true,
+      resolved: loadResolvedRefundRequest(tx, refundRequestId),
+    };
   });
+
+  if (!outcome.ok) return outcome;
+
+  await sendResolutionNotifications(notifier, status, outcome.resolved);
+  return { ok: true };
+}
+
+// Committed by now. Approving sends nothing yet: its Notifications
+// ("refund-request-approved", "access-ended") are added here.
+async function sendResolutionNotifications(
+  notifier: Notifier,
+  status: schema.RefundStatus.Approved | schema.RefundStatus.Declined,
+  { buyer, course }: ResolvedRefundRequest
+) {
+  switch (status) {
+    case schema.RefundStatus.Declined:
+      await notify(notifier, {
+        kind: "refund-request-declined",
+        recipients: [buyer],
+        data: { course_title: course.title, course_slug: course.slug },
+      });
+      return;
+    case schema.RefundStatus.Approved:
+      return;
+  }
 }
 
 /**
@@ -483,12 +564,14 @@ function resolveRefundRequest(
  */
 export function declineRefundRequest(
   db: Db,
+  notifier: Notifier,
   refundRequestId: number,
   actingUserId: number,
   now: Date
-): ResolveRefundRequestResult {
+): Promise<ResolveRefundRequestResult> {
   return resolveRefundRequest(
     db,
+    notifier,
     refundRequestId,
     actingUserId,
     now,
@@ -505,12 +588,14 @@ export function declineRefundRequest(
  */
 export function approveRefundRequest(
   db: Db,
+  notifier: Notifier,
   refundRequestId: number,
   actingUserId: number,
   now: Date
-): ResolveRefundRequestResult {
+): Promise<ResolveRefundRequestResult> {
   return resolveRefundRequest(
     db,
+    notifier,
     refundRequestId,
     actingUserId,
     now,

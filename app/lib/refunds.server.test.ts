@@ -1,6 +1,10 @@
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, vi } from "vitest";
 import { eq } from "drizzle-orm";
 import { createTestDb, seedBaseData } from "~/test/setup";
+import {
+  createRecordingNotifier,
+  type RecordingNotifier,
+} from "~/test/recording-notifier";
 import * as schema from "~/db/schema";
 import {
   approveRefundRequest,
@@ -17,10 +21,12 @@ type TestDb = ReturnType<typeof createTestDb>;
 
 let db: TestDb;
 let base: ReturnType<typeof seedBaseData>;
+let notifier: RecordingNotifier;
 
 beforeEach(() => {
   db = createTestDb();
   base = seedBaseData(db);
+  notifier = createRecordingNotifier();
 });
 
 // ─── Factories ───
@@ -473,7 +479,12 @@ describe("listRefundRequests", () => {
   ) {
     return db
       .insert(schema.refunds)
-      .values({ purchaseId, reason: "Not what I expected", requestedAt, status })
+      .values({
+        purchaseId,
+        reason: "Not what I expected",
+        requestedAt,
+        status,
+      })
       .returning()
       .get();
   }
@@ -482,20 +493,24 @@ describe("listRefundRequests", () => {
     const purchase = buyCourse("2026-03-01T10:00:00");
     const request = requestRefund(purchase.id, "2026-03-02T09:00:00");
 
-    expect(
-      listRefundRequests(db, schema.RefundStatus.Requested)
-    ).toMatchObject([
-      {
-        id: request.id,
-        status: schema.RefundStatus.Requested,
-        purchaseId: purchase.id,
-        learner: { id: base.user.id, name: "Test User", email: "test@example.com" },
-        course: { id: base.course.id, title: "Test Course" },
-        reason: "Not what I expected",
-        requestedAt: "2026-03-02T09:00:00",
-        refundableAmount: 4900,
-      },
-    ]);
+    expect(listRefundRequests(db, schema.RefundStatus.Requested)).toMatchObject(
+      [
+        {
+          id: request.id,
+          status: schema.RefundStatus.Requested,
+          purchaseId: purchase.id,
+          learner: {
+            id: base.user.id,
+            name: "Test User",
+            email: "test@example.com",
+          },
+          course: { id: base.course.id, title: "Test Course" },
+          reason: "Not what I expected",
+          requestedAt: "2026-03-02T09:00:00",
+          refundableAmount: 4900,
+        },
+      ]
+    );
   });
 
   it("marks a solo purchase as not a team purchase, with no seats", () => {
@@ -666,11 +681,13 @@ describe("declineRefundRequest", () => {
       .get();
   }
 
-  it("marks an Open Refund Request Declined, recording who declined it and when", () => {
+  it("marks an Open Refund Request Declined, recording who declined it and when", async () => {
     const admin = addAdmin();
     const request = openRefundRequest();
 
-    expect(declineRefundRequest(db, request.id, admin.id, now)).toEqual({
+    expect(
+      await declineRefundRequest(db, notifier, request.id, admin.id, now)
+    ).toEqual({
       ok: true,
     });
     expect(findRefundRequest(request.id)).toMatchObject({
@@ -683,7 +700,91 @@ describe("declineRefundRequest", () => {
 
   // Declining changes nothing but the status: the learner keeps access and
   // progress, the purchase still counts, and team seat codes still work.
-  it("leaves enrollments, seat codes, progress and the purchase unchanged", () => {
+  it("tells the buyer, and nobody else, that the refund was declined", async () => {
+    const admin = addAdmin();
+    const request = openRefundRequest();
+
+    await declineRefundRequest(db, notifier, request.id, admin.id, now);
+
+    expect(notifier.sent).toEqual([
+      {
+        kind: "refund-request-declined",
+        recipientIds: [base.user.id],
+        actor: undefined,
+        data: { course_title: "Test Course", course_slug: "test-course" },
+      },
+    ]);
+  });
+
+  it("sends only once the decline is committed", async () => {
+    const admin = addAdmin();
+    const request = openRefundRequest();
+    const statusWhenSent: (string | undefined)[] = [];
+    const watching: RecordingNotifier = {
+      sent: [],
+      async send() {
+        statusWhenSent.push(findRefundRequest(request.id)?.status);
+      },
+    };
+
+    await declineRefundRequest(db, watching, request.id, admin.id, now);
+
+    expect(statusWhenSent).toEqual([schema.RefundStatus.Declined]);
+  });
+
+  it.each([
+    ["a student", () => base.user.id],
+    ["nobody", () => 999],
+  ])("sends nothing when %s tries to decline", async (_, actingUserId) => {
+    const request = openRefundRequest();
+
+    await declineRefundRequest(db, notifier, request.id, actingUserId(), now);
+
+    expect(notifier.sent).toEqual([]);
+  });
+
+  it("sends nothing for a request that does not exist or is already resolved", async () => {
+    const admin = addAdmin();
+    const request = openRefundRequest(schema.RefundStatus.Approved);
+
+    await declineRefundRequest(db, notifier, 999, admin.id, now);
+    await declineRefundRequest(db, notifier, request.id, admin.id, now);
+
+    expect(notifier.sent).toEqual([]);
+  });
+
+  it("still declines when the Notifier throws, logging one line without secrets", async () => {
+    const admin = addAdmin();
+    const request = openRefundRequest();
+    const failing = createRecordingNotifier({
+      failWith: Object.assign(new Error("429 Too many requests"), {
+        status: 429,
+      }),
+    });
+    const consoleError = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => {});
+
+    const result = await declineRefundRequest(
+      db,
+      failing,
+      request.id,
+      admin.id,
+      now
+    );
+
+    expect(result).toEqual({ ok: true });
+    expect(findRefundRequest(request.id)?.status).toBe(
+      schema.RefundStatus.Declined
+    );
+    expect(consoleError).toHaveBeenCalledTimes(1);
+    expect(consoleError).toHaveBeenCalledWith(
+      `[notifier] refund-request-declined to user ${base.user.id} failed: 429 429 Too many requests`
+    );
+    consoleError.mockRestore();
+  });
+
+  it("leaves enrollments, seat codes, progress and the purchase unchanged", async () => {
     const admin = addAdmin();
     const [lesson] = addLessons(1);
     const request = openRefundRequest();
@@ -711,7 +812,9 @@ describe("declineRefundRequest", () => {
     });
     const before = snapshot();
 
-    expect(declineRefundRequest(db, request.id, admin.id, now)).toEqual({
+    expect(
+      await declineRefundRequest(db, notifier, request.id, admin.id, now)
+    ).toEqual({
       ok: true,
     });
     expect(snapshot()).toEqual(before);
@@ -719,10 +822,12 @@ describe("declineRefundRequest", () => {
     expect(before.coupons).toHaveLength(1);
   });
 
-  it("reports a Refund Request that doesn't exist", () => {
+  it("reports a Refund Request that doesn't exist", async () => {
     const admin = addAdmin();
 
-    expect(declineRefundRequest(db, 999, admin.id, now)).toEqual({
+    expect(
+      await declineRefundRequest(db, notifier, 999, admin.id, now)
+    ).toEqual({
       ok: false,
       error: "not-found",
     });
@@ -730,7 +835,7 @@ describe("declineRefundRequest", () => {
 
   // Two admins act on the same request: the second finds it already resolved,
   // and the first admin's decision stands.
-  it("refuses a request another admin already declined, changing nothing", () => {
+  it("refuses a request another admin already declined, changing nothing", async () => {
     const firstAdmin = addAdmin();
     const secondAdmin = db
       .insert(schema.users)
@@ -742,11 +847,12 @@ describe("declineRefundRequest", () => {
       .returning()
       .get();
     const request = openRefundRequest();
-    declineRefundRequest(db, request.id, firstAdmin.id, now);
+    await declineRefundRequest(db, notifier, request.id, firstAdmin.id, now);
 
     expect(
-      declineRefundRequest(
+      await declineRefundRequest(
         db,
+        notifier,
         request.id,
         secondAdmin.id,
         new Date("2026-03-05T15:31:00.000Z")
@@ -760,11 +866,13 @@ describe("declineRefundRequest", () => {
   });
 
   // A resolution is final: an Approved request never becomes Declined.
-  it("refuses to decline an Approved request, changing nothing", () => {
+  it("refuses to decline an Approved request, changing nothing", async () => {
     const admin = addAdmin();
     const request = openRefundRequest(schema.RefundStatus.Approved);
 
-    expect(declineRefundRequest(db, request.id, admin.id, now)).toEqual({
+    expect(
+      await declineRefundRequest(db, notifier, request.id, admin.id, now)
+    ).toEqual({
       ok: false,
       error: "already-resolved",
     });
@@ -779,10 +887,12 @@ describe("declineRefundRequest", () => {
   it.each([
     ["an instructor", () => base.instructor.id],
     ["a student", () => base.user.id],
-  ])("refuses %s, leaving the request Open", (_, actingUserId) => {
+  ])("refuses %s, leaving the request Open", async (_, actingUserId) => {
     const request = openRefundRequest();
 
-    expect(declineRefundRequest(db, request.id, actingUserId(), now)).toEqual({
+    expect(
+      await declineRefundRequest(db, notifier, request.id, actingUserId(), now)
+    ).toEqual({
       ok: false,
       error: "not-an-admin",
     });
@@ -832,11 +942,13 @@ describe("approveRefundRequest", () => {
       .get();
   }
 
-  it("marks an Open Refund Request Approved, recording who approved it, when, and the Amount Refunded", () => {
+  it("marks an Open Refund Request Approved, recording who approved it, when, and the Amount Refunded", async () => {
     const admin = addAdmin();
     const request = openSoloRefundRequest();
 
-    expect(approveRefundRequest(db, request.id, admin.id, now)).toEqual({
+    expect(
+      await approveRefundRequest(db, notifier, request.id, admin.id, now)
+    ).toEqual({
       ok: true,
     });
     expect(findRefundRequest(request.id)).toMatchObject({
@@ -857,7 +969,7 @@ describe("approveRefundRequest", () => {
 
   // ADR 0001: access is "an enrollment row exists", so Approve deletes it.
   // Progress is keyed by user and lesson, so it survives for a re-buy.
-  it("removes the learner's enrollment for the course and keeps their progress", () => {
+  it("removes the learner's enrollment for the course and keeps their progress", async () => {
     const admin = addAdmin();
     const [lesson] = addLessons(1);
     const otherCourse = addOtherCourse();
@@ -873,7 +985,9 @@ describe("approveRefundRequest", () => {
     const progressBefore = db.select().from(schema.lessonProgress).all();
     const watchEventsBefore = db.select().from(schema.videoWatchEvents).all();
 
-    expect(approveRefundRequest(db, request.id, admin.id, now)).toEqual({
+    expect(
+      await approveRefundRequest(db, notifier, request.id, admin.id, now)
+    ).toEqual({
       ok: true,
     });
     expect(enrollmentsOf(base.user.id)).toEqual([{ courseId: otherCourse.id }]);
@@ -891,7 +1005,7 @@ describe("approveRefundRequest", () => {
   });
 
   // The learner gets back what they paid, even if the price has moved since.
-  it("records Amount Refunded as the amount paid, not the course's current list price", () => {
+  it("records Amount Refunded as the amount paid, not the course's current list price", async () => {
     const admin = addAdmin();
     const request = openSoloRefundRequest();
     db.update(schema.courses)
@@ -899,15 +1013,17 @@ describe("approveRefundRequest", () => {
       .where(eq(schema.courses.id, base.course.id))
       .run();
 
-    approveRefundRequest(db, request.id, admin.id, now);
+    await approveRefundRequest(db, notifier, request.id, admin.id, now);
 
     expect(findRefundRequest(request.id)?.amountRefunded).toBe(4900);
   });
 
-  it("reports a Refund Request that doesn't exist", () => {
+  it("reports a Refund Request that doesn't exist", async () => {
     const admin = addAdmin();
 
-    expect(approveRefundRequest(db, 999, admin.id, now)).toEqual({
+    expect(
+      await approveRefundRequest(db, notifier, 999, admin.id, now)
+    ).toEqual({
       ok: false,
       error: "not-found",
     });
@@ -918,11 +1034,13 @@ describe("approveRefundRequest", () => {
   it.each([
     ["Declined", schema.RefundStatus.Declined],
     ["already Approved", schema.RefundStatus.Approved],
-  ])("refuses a request that is %s, changing nothing", (_, status) => {
+  ])("refuses a request that is %s, changing nothing", async (_, status) => {
     const admin = addAdmin();
     const request = openSoloRefundRequest(status);
 
-    expect(approveRefundRequest(db, request.id, admin.id, now)).toEqual({
+    expect(
+      await approveRefundRequest(db, notifier, request.id, admin.id, now)
+    ).toEqual({
       ok: false,
       error: "already-resolved",
     });
@@ -935,7 +1053,7 @@ describe("approveRefundRequest", () => {
     expect(enrollmentsOf(base.user.id)).toEqual([{ courseId: base.course.id }]);
   });
 
-  it("removes every member's enrollment from a team purchase whose seats were claimed while the request was Open, keeping their progress", () => {
+  it("removes every member's enrollment from a team purchase whose seats were claimed while the request was Open, keeping their progress", async () => {
     const admin = addAdmin();
     const [lesson] = addLessons(1);
     const otherCourse = addOtherCourse();
@@ -950,7 +1068,9 @@ describe("approveRefundRequest", () => {
     complete(lesson.id, olivia.id);
     watch(lesson.id, 600, liam.id);
 
-    expect(approveRefundRequest(db, request.id, admin.id, now)).toEqual({
+    expect(
+      await approveRefundRequest(db, notifier, request.id, admin.id, now)
+    ).toEqual({
       ok: true,
     });
     expect(enrollmentsOf(olivia.id)).toEqual([{ courseId: otherCourse.id }]);
@@ -960,14 +1080,14 @@ describe("approveRefundRequest", () => {
     expect(findRefundRequest(request.id)?.amountRefunded).toBe(4900);
   });
 
-  it("stops a team purchase's unclaimed seat codes from being claimed", () => {
+  it("stops a team purchase's unclaimed seat codes from being claimed", async () => {
     const admin = addAdmin();
     const olivia = addMember("Olivia");
     const liam = addMember("Liam");
     const { request, codes } = openTeamRefundRequest(3);
     claimSeat(codes[0], olivia.id, "2026-03-03T10:00:00.000Z");
 
-    approveRefundRequest(db, request.id, admin.id, now);
+    await approveRefundRequest(db, notifier, request.id, admin.id, now);
 
     expect(redeemSeatCode(db, codes[1], liam.id, "", now)).toEqual({
       ok: false,
@@ -982,13 +1102,13 @@ describe("approveRefundRequest", () => {
 
   // Only unclaimed seat codes become unclaimable: a Claimed Seat stays a seat
   // on the team's record, even though its member lost access.
-  it("leaves a team purchase's Claimed Seats unvoided", () => {
+  it("leaves a team purchase's Claimed Seats unvoided", async () => {
     const admin = addAdmin();
     const olivia = addMember("Olivia");
     const { request, codes } = openTeamRefundRequest(2);
     claimSeat(codes[0], olivia.id, "2026-03-03T10:00:00.000Z");
 
-    approveRefundRequest(db, request.id, admin.id, now);
+    await approveRefundRequest(db, notifier, request.id, admin.id, now);
 
     expect(getSeatCode(db, codes[0])).toMatchObject({
       redeemedByUserId: olivia.id,
@@ -1005,15 +1125,21 @@ describe("approveRefundRequest", () => {
     ["a student", () => base.user.id],
   ])(
     "refuses %s, leaving the request Open and access in place",
-    (_, actingUserId) => {
+    async (_, actingUserId) => {
       const request = openSoloRefundRequest();
 
-      expect(approveRefundRequest(db, request.id, actingUserId(), now)).toEqual(
-        {
-          ok: false,
-          error: "not-an-admin",
-        }
-      );
+      expect(
+        await approveRefundRequest(
+          db,
+          notifier,
+          request.id,
+          actingUserId(),
+          now
+        )
+      ).toEqual({
+        ok: false,
+        error: "not-an-admin",
+      });
       expect(findRefundRequest(request.id)).toMatchObject({
         status: schema.RefundStatus.Requested,
         resolvedByUserId: null,
@@ -1049,7 +1175,7 @@ describe("listRefundRequests for resolved requests", () => {
 
   // The admin looking back wants what was just resolved at the top, whatever
   // order the requests came in.
-  it("lists Declined requests most recently resolved first, with who resolved them and when", () => {
+  it("lists Declined requests most recently resolved first, with who resolved them and when", async () => {
     const ada = addAdmin("Ada Admin", "ada@example.com");
     const bo = addAdmin("Bo Admin", "bo@example.com");
     // Requested first but declined first too, so it ends up last.
@@ -1065,14 +1191,16 @@ describe("listRefundRequests for resolved requests", () => {
       "2026-03-01T12:00:00",
       "2026-03-03T09:00:00"
     );
-    declineRefundRequest(
+    await declineRefundRequest(
       db,
+      notifier,
       declinedFirst.id,
       ada.id,
       new Date("2026-03-06T10:00:00.000Z")
     );
-    declineRefundRequest(
+    await declineRefundRequest(
       db,
+      notifier,
       declinedLast.id,
       bo.id,
       new Date("2026-03-07T10:00:00.000Z")
@@ -1100,7 +1228,7 @@ describe("listRefundRequests for resolved requests", () => {
     ]);
   });
 
-  it("lists Approved requests most recently resolved first, with the Amount Refunded", () => {
+  it("lists Approved requests most recently resolved first, with the Amount Refunded", async () => {
     const ada = addAdmin("Ada Admin", "ada@example.com");
     const approvedFirst = openRefundRequest(
       "2026-03-01T10:00:00",
@@ -1114,20 +1242,23 @@ describe("listRefundRequests for resolved requests", () => {
       "2026-03-01T12:00:00",
       "2026-03-03T09:00:00"
     );
-    approveRefundRequest(
+    await approveRefundRequest(
       db,
+      notifier,
       approvedFirst.id,
       ada.id,
       new Date("2026-03-06T10:00:00.000Z")
     );
-    approveRefundRequest(
+    await approveRefundRequest(
       db,
+      notifier,
       approvedLast.id,
       ada.id,
       new Date("2026-03-07T10:00:00.000Z")
     );
-    declineRefundRequest(
+    await declineRefundRequest(
       db,
+      notifier,
       declined.id,
       ada.id,
       new Date("2026-03-08T10:00:00.000Z")
@@ -1153,13 +1284,14 @@ describe("listRefundRequests for resolved requests", () => {
 
   // Voided seat codes are no longer seats, so the admin's seat count drops
   // them, but the purchase was still bought for a team.
-  it("counts only the Claimed Seats of an Approved team purchase, still marking it a team purchase", () => {
+  it("counts only the Claimed Seats of an Approved team purchase, still marking it a team purchase", async () => {
     const ada = addAdmin("Ada Admin", "ada@example.com");
     const olivia = addMember("Olivia");
     const { request, codes } = openTeamRefundRequest(3);
     claimSeat(codes[0], olivia.id, "2026-03-03T10:00:00.000Z");
-    approveRefundRequest(
+    await approveRefundRequest(
       db,
+      notifier,
       request.id,
       ada.id,
       new Date("2026-03-06T10:00:00.000Z")
@@ -1172,11 +1304,12 @@ describe("listRefundRequests for resolved requests", () => {
 
   // With no seat claimed, every code is voided and there are no seats left,
   // yet it is still a team purchase, not a solo one.
-  it("still marks an Approved team purchase with no Claimed Seats as a team purchase", () => {
+  it("still marks an Approved team purchase with no Claimed Seats as a team purchase", async () => {
     const ada = addAdmin("Ada Admin", "ada@example.com");
     const { request } = openTeamRefundRequest(2);
-    approveRefundRequest(
+    await approveRefundRequest(
       db,
+      notifier,
       request.id,
       ada.id,
       new Date("2026-03-06T10:00:00.000Z")
@@ -1187,7 +1320,7 @@ describe("listRefundRequests for resolved requests", () => {
     ]);
   });
 
-  it("lists an Open request with no resolver, resolved-at or Amount Refunded", () => {
+  it("lists an Open request with no resolver, resolved-at or Amount Refunded", async () => {
     openRefundRequest("2026-03-01T10:00:00", "2026-03-02T09:00:00");
 
     expect(listRefundRequests(db, schema.RefundStatus.Requested)).toMatchObject(
