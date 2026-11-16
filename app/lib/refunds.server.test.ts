@@ -14,6 +14,7 @@ import {
   getRefundRequest,
   getWatchedSeconds,
   listRefundRequests,
+  openRefundRequest,
 } from "./refunds.server";
 import { getSeatCode, redeemSeatCode } from "./seat-codes.server";
 
@@ -721,11 +722,7 @@ describe("declineRefundRequest", () => {
     const request = openRefundRequest();
     const statusWhenSent: (string | undefined)[] = [];
     const watching: RecordingNotifier = {
-      sent: [],
-      tokensIssuedFor: [],
-      async issueInboxToken() {
-        return null;
-      },
+      ...createRecordingNotifier(),
       async send() {
         statusWhenSent.push(findRefundRequest(request.id)?.status);
       },
@@ -1093,7 +1090,9 @@ describe("approveRefundRequest", () => {
 
     await approveRefundRequest(db, notifier, request.id, admin.id, now);
 
-    expect(redeemSeatCode(db, codes[1], liam.id, "", now)).toEqual({
+    expect(
+      await redeemSeatCode(db, notifier, codes[1], liam.id, "", now)
+    ).toEqual({
       ok: false,
       error: "This seat code no longer works: its purchase was refunded",
     });
@@ -1101,6 +1100,116 @@ describe("approveRefundRequest", () => {
     expect(getSeatCode(db, codes[1])).toMatchObject({
       redeemedByUserId: null,
       redeemedAt: null,
+    });
+  });
+
+  describe("Notifications", () => {
+    it("tells the buyer of a solo purchase their refund was approved, with the Amount Refunded as money, and nobody else", async () => {
+      const admin = addAdmin();
+      const request = openSoloRefundRequest();
+
+      await approveRefundRequest(db, notifier, request.id, admin.id, now);
+
+      expect(notifier.sent).toEqual([
+        {
+          kind: "refund-request-approved",
+          recipientIds: [base.user.id],
+          actor: undefined,
+          data: {
+            course_title: base.course.title,
+            course_slug: base.course.slug,
+            amount: "$49.00",
+          },
+        },
+      ]);
+    });
+
+    it("tells the buyer of a team purchase, and every member with a Claimed Seat that their access ended", async () => {
+      const admin = addAdmin();
+      const olivia = addMember("Olivia");
+      const liam = addMember("Liam");
+      const { request, codes } = openTeamRefundRequest(3);
+      claimSeat(codes[0], olivia.id, "2026-03-03T10:00:00.000Z");
+      claimSeat(codes[1], liam.id, "2026-03-04T10:00:00.000Z");
+
+      await approveRefundRequest(db, notifier, request.id, admin.id, now);
+
+      expect(notifier.sent.map((n) => [n.kind, n.recipientIds])).toEqual([
+        ["refund-request-approved", [base.user.id]],
+        ["access-ended", [olivia.id, liam.id]],
+      ]);
+      expect(notifier.sent[1]).toMatchObject({
+        actor: undefined,
+        data: {
+          course_title: base.course.title,
+          course_slug: base.course.slug,
+        },
+      });
+    });
+
+    it("tells nobody on another purchase of the same course that their access ended", async () => {
+      const admin = addAdmin();
+      const olivia = addMember("Olivia");
+      const noah = addMember("Noah");
+      const { request, codes } = openTeamRefundRequest(2);
+      claimSeat(codes[0], olivia.id, "2026-03-03T10:00:00.000Z");
+      // Another team's purchase of the same course, with a Claimed Seat.
+      const otherPurchase = buyCourse("2026-03-01T11:00:00", noah.id);
+      const otherTeam = db.insert(schema.teams).values({}).returning().get();
+      db.insert(schema.coupons)
+        .values({
+          teamId: otherTeam.id,
+          courseId: base.course.id,
+          code: "OTHER-1",
+          purchaseId: otherPurchase.id,
+        })
+        .run();
+      claimSeat("OTHER-1", noah.id, "2026-03-03T11:00:00.000Z");
+
+      await approveRefundRequest(db, notifier, request.id, admin.id, now);
+
+      expect(notifier.sent.flatMap((n) => n.recipientIds)).toEqual([
+        base.user.id,
+        olivia.id,
+      ]);
+      expect(enrollmentsOf(noah.id)).toEqual([{ courseId: base.course.id }]);
+    });
+
+    it("words a free purchase's Amount Refunded as money, not as Free", async () => {
+      const admin = addAdmin();
+      const request = openSoloRefundRequest();
+      db.update(schema.purchases)
+        .set({ amountPaid: 0 })
+        .where(eq(schema.purchases.id, request.purchaseId))
+        .run();
+
+      await approveRefundRequest(db, notifier, request.id, admin.id, now);
+
+      expect(notifier.sent[0].data).toMatchObject({ amount: "$0.00" });
+    });
+
+    it("sends nothing when the approval is refused", async () => {
+      const admin = addAdmin();
+      const approved = openSoloRefundRequest(schema.RefundStatus.Approved);
+
+      await approveRefundRequest(db, notifier, approved.id, admin.id, now);
+      await approveRefundRequest(db, notifier, 999, admin.id, now);
+      await approveRefundRequest(db, notifier, approved.id, base.user.id, now);
+
+      expect(notifier.sent).toEqual([]);
+    });
+
+    it("still approves when the Notifier throws", async () => {
+      const admin = addAdmin();
+      const request = openSoloRefundRequest();
+      const failing = createRecordingNotifier({ failWith: new Error("down") });
+
+      expect(
+        await approveRefundRequest(db, failing, request.id, admin.id, now)
+      ).toEqual({ ok: true });
+      expect(findRefundRequest(request.id)?.status).toBe(
+        schema.RefundStatus.Approved
+      );
     });
   });
 
@@ -1330,5 +1439,115 @@ describe("listRefundRequests for resolved requests", () => {
     expect(listRefundRequests(db, schema.RefundStatus.Requested)).toMatchObject(
       [{ resolvedBy: null, resolvedAt: null, amountRefunded: null }]
     );
+  });
+});
+
+describe("openRefundRequest", () => {
+  const now = new Date("2026-03-05T15:30:00.000Z");
+  const reason = "It was not what I expected";
+
+  function addAdmin(email: string) {
+    return db
+      .insert(schema.users)
+      .values({ name: `Admin ${email}`, email, role: schema.UserRole.Admin })
+      .returning()
+      .get();
+  }
+
+  function open(
+    text: string,
+    learner = base.user,
+    purchase = buyCourse("2026-03-01T10:00:00", learner.id)
+  ) {
+    return openRefundRequest(db, notifier, {
+      purchase,
+      learner,
+      course: base.course,
+      reason: text,
+      now,
+    });
+  }
+
+  function savedRequests() {
+    return db.select().from(schema.refunds).all();
+  }
+
+  it("sends open-refund-request to the admin with the learner as actor", async () => {
+    const admin = addAdmin("a@example.com");
+
+    expect(await open(reason)).toEqual({ ok: true });
+
+    expect(savedRequests()).toHaveLength(1);
+    expect(notifier.sent).toEqual([
+      {
+        kind: "open-refund-request",
+        recipientIds: [admin.id],
+        actor: {
+          id: base.user.id,
+          name: base.user.name,
+          avatarUrl: base.user.avatarUrl,
+        },
+        data: { course_title: base.course.title, excerpt: reason },
+      },
+    ]);
+  });
+
+  it("sends to every admin", async () => {
+    const first = addAdmin("a@example.com");
+    const second = addAdmin("b@example.com");
+
+    await open(reason);
+
+    expect(notifier.sent[0].recipientIds).toEqual([first.id, second.id]);
+  });
+
+  it("does not notify an admin about their own Refund Request", async () => {
+    const admin = addAdmin("a@example.com");
+    const other = addAdmin("b@example.com");
+
+    await open(reason, admin);
+
+    expect(notifier.sent).toHaveLength(1);
+    expect(notifier.sent[0].recipientIds).toEqual([other.id]);
+  });
+
+  it("sends a long markdown reason as a plain-text excerpt of about 140 characters", async () => {
+    addAdmin("a@example.com");
+
+    await open(
+      `**Bold** and [a link](https://example.com) ${"word ".repeat(100)}`
+    );
+
+    const { excerpt } = notifier.sent[0].data as { excerpt: string };
+    expect(excerpt.startsWith("Bold and a link word word")).toBe(true);
+    expect(excerpt.endsWith("…")).toBe(true);
+    expect(excerpt.length).toBeLessThanOrEqual(140);
+    expect(excerpt.length).toBeGreaterThan(130);
+  });
+
+  it("sends nothing and saves nothing when the purchase is ineligible", async () => {
+    addAdmin("a@example.com");
+    const purchase = buyCourse("2026-01-01T10:00:00");
+
+    expect(await open(reason, base.user, purchase)).toEqual({
+      ok: false,
+      reason: "outside-refund-window",
+    });
+
+    expect(notifier.sent).toEqual([]);
+    expect(savedRequests()).toEqual([]);
+  });
+
+  it("opens the Refund Request even when the Notifier throws", async () => {
+    addAdmin("a@example.com");
+    notifier = createRecordingNotifier({
+      failWith: new Error("Knock is down"),
+    });
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    expect(await open(reason)).toEqual({ ok: true });
+
+    expect(savedRequests()).toHaveLength(1);
+    log.mockRestore();
   });
 });

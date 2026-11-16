@@ -1,5 +1,10 @@
 import Knock, { signUserToken } from "@knocklabs/node";
 import type { Notification, NotificationUser } from "~/lib/notifications";
+import {
+  PREFERENCE_KINDS,
+  type PreferenceKind,
+  type Preferences,
+} from "~/lib/notification-preferences";
 
 /**
  * The only server code that talks to Knock, in Cadence's language. Callers
@@ -20,6 +25,23 @@ export interface Notifier {
    * Knock is not configured. Never log it.
    */
   issueInboxToken(userId: number): Promise<string | null>;
+
+  /**
+   * Reads a person's switches. Every kind is present; one they never saved,
+   * or a person Knock has never seen, is on.
+   */
+  getPreferences(userId: number): Promise<Preferences>;
+
+  /**
+   * Saves one switch, merging into the saved set so the other switches stay
+   * as they were. Only a kind that can be switched off is accepted:
+   * "access-ended" is not a `PreferenceKind`.
+   */
+  setPreference(
+    userId: number,
+    kind: PreferenceKind,
+    enabled: boolean
+  ): Promise<void>;
 }
 
 const INBOX_TOKEN_SECONDS = 60 * 60;
@@ -80,6 +102,42 @@ export type KnockWorkflows = {
   ): Promise<unknown>;
 };
 
+/** The slice of the Knock SDK the Notifier uses for preferences. */
+export type KnockUsers = {
+  getPreferences(
+    userId: string,
+    preferenceSetId: string
+  ): Promise<{ workflows?: Record<string, unknown> | null }>;
+  setPreferences(
+    userId: string,
+    preferenceSetId: string,
+    body: {
+      __persistence_strategy__: "merge";
+      workflows: Record<string, { channel_types: { in_app_feed: boolean } }>;
+    }
+  ): Promise<unknown>;
+};
+
+const PREFERENCE_SET_ID = "default";
+
+/** Knock treats anything not explicitly `false` as on. */
+function isSwitchedOn(workflow: unknown): boolean {
+  if (workflow === false) return false;
+  if (workflow instanceof Object && "channel_types" in workflow) {
+    const channelTypes = workflow.channel_types;
+    if (channelTypes instanceof Object && "in_app_feed" in channelTypes) {
+      return channelTypes.in_app_feed !== false;
+    }
+  }
+  return true;
+}
+
+function allOn(): Preferences {
+  return Object.fromEntries(
+    PREFERENCE_KINDS.map((kind) => [kind, true])
+  ) as Preferences;
+}
+
 function identify(user: NotificationUser) {
   // Knock user IDs are strings; the Cadence user ID is the Knock user ID.
   return { id: String(user.id), name: user.name, avatar: user.avatarUrl };
@@ -87,6 +145,7 @@ function identify(user: NotificationUser) {
 
 export function createKnockNotifier(
   workflows: KnockWorkflows,
+  users: KnockUsers,
   signingKey: string
 ): Notifier {
   return {
@@ -106,6 +165,32 @@ export function createKnockNotifier(
         data: notification.data,
       });
     },
+    async getPreferences(userId) {
+      let workflowPreferences: Record<string, unknown> | null | undefined;
+      try {
+        const set = await users.getPreferences(
+          String(userId),
+          PREFERENCE_SET_ID
+        );
+        workflowPreferences = set.workflows;
+      } catch (error) {
+        // Knock has never seen this person: nothing saved, so everything on.
+        if (describeStatus(error) === "404") return allOn();
+        throw error;
+      }
+      const preferences = allOn();
+      for (const kind of PREFERENCE_KINDS) {
+        preferences[kind] = isSwitchedOn(workflowPreferences?.[kind]);
+      }
+      return preferences;
+    },
+    async setPreference(userId, kind, enabled) {
+      await users.setPreferences(String(userId), PREFERENCE_SET_ID, {
+        // Without merge Knock replaces the whole set, dropping other switches.
+        __persistence_strategy__: "merge",
+        workflows: { [kind]: { channel_types: { in_app_feed: enabled } } },
+      });
+    },
   };
 }
 
@@ -116,6 +201,10 @@ export function createNoopNotifier(): Notifier {
     async issueInboxToken() {
       return null;
     },
+    async getPreferences() {
+      return allOn();
+    },
+    async setPreference() {},
   };
 }
 
@@ -169,7 +258,7 @@ export function createNotifierFromEnv(env: Env): Notifier {
     maxRetries: KNOCK_MAX_RETRIES,
     timeout: KNOCK_TIMEOUT_MS,
   });
-  return createKnockNotifier(knock.workflows, config.signingKey);
+  return createKnockNotifier(knock.workflows, knock.users, config.signingKey);
 }
 
 let instance: Notifier | undefined;

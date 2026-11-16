@@ -12,6 +12,9 @@
       "channel_key": "in-app"
     }
   ],
+  "settings": {
+    "override_preferences": true
+  },
   "trigger_frequency": "every_trigger",
   "__readonly": {
     "key": "access-ended",

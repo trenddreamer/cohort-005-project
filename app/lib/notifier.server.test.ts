@@ -7,6 +7,7 @@ import {
   createNotifierFromEnv,
   notify,
   type KnockWorkflows,
+  type KnockUsers,
 } from "./notifier.server";
 import type { Notification, NotificationUser } from "./notifications";
 import { createRecordingNotifier } from "~/test/recording-notifier";
@@ -84,6 +85,109 @@ describe("the recording fake", () => {
   });
 });
 
+function stubUsers() {
+  const getPreferences = vi
+    .fn<KnockUsers["getPreferences"]>()
+    .mockResolvedValue({ workflows: null });
+  const setPreferences = vi
+    .fn<KnockUsers["setPreferences"]>()
+    .mockResolvedValue({});
+  return {
+    users: { getPreferences, setPreferences },
+    getPreferences,
+    setPreferences,
+  };
+}
+
+describe("the Knock Notifier preferences", () => {
+  const workflows = { trigger: vi.fn() };
+
+  it("saves one switch with a merge, in the in-app feed channel type", async () => {
+    const { users, setPreferences } = stubUsers();
+
+    await createKnockNotifier(workflows, users, signingKey).setPreference(
+      7,
+      "comment-reply",
+      false
+    );
+
+    expect(setPreferences).toHaveBeenCalledWith("7", "default", {
+      __persistence_strategy__: "merge",
+      workflows: { "comment-reply": { channel_types: { in_app_feed: false } } },
+    });
+  });
+
+  it("reads everything as on when nothing is saved", async () => {
+    const { users } = stubUsers();
+
+    const preferences = await createKnockNotifier(
+      workflows,
+      users,
+      signingKey
+    ).getPreferences(7);
+
+    expect(Object.values(preferences)).toEqual(Array(7).fill(true));
+  });
+
+  it("reads a switch as off only when Knock says false", async () => {
+    const { users, getPreferences } = stubUsers();
+    getPreferences.mockResolvedValue({
+      workflows: {
+        "comment-reply": { channel_types: { in_app_feed: false } },
+        "lesson-comment": false,
+        "new-enrollment": { channel_types: { email: false } },
+        "seat-claimed": { channel_types: { in_app_feed: true } },
+      },
+    });
+
+    const preferences = await createKnockNotifier(
+      workflows,
+      users,
+      signingKey
+    ).getPreferences(7);
+
+    expect(preferences["comment-reply"]).toBe(false);
+    expect(preferences["lesson-comment"]).toBe(false);
+    expect(preferences["new-enrollment"]).toBe(true);
+    expect(preferences["seat-claimed"]).toBe(true);
+    expect(preferences["open-refund-request"]).toBe(true);
+  });
+
+  it("reads everything as on for a person Knock has never seen", async () => {
+    const { users, getPreferences } = stubUsers();
+    getPreferences.mockRejectedValue(
+      Object.assign(new Error("not found"), { status: 404 })
+    );
+
+    const preferences = await createKnockNotifier(
+      workflows,
+      users,
+      signingKey
+    ).getPreferences(7);
+
+    expect(preferences["comment-reply"]).toBe(true);
+  });
+
+  it("does not hide other failures", async () => {
+    const { users, getPreferences } = stubUsers();
+    getPreferences.mockRejectedValue(
+      Object.assign(new Error("boom"), { status: 500 })
+    );
+
+    await expect(
+      createKnockNotifier(workflows, users, signingKey).getPreferences(7)
+    ).rejects.toThrow("boom");
+  });
+});
+
+describe("the no-op Notifier preferences", () => {
+  it("reads everything as on and accepts a save", async () => {
+    const notifier = createNoopNotifier();
+    await notifier.setPreference(7, "comment-reply", false);
+    expect((await notifier.getPreferences(7))["comment-reply"]).toBe(true);
+  });
+});
+
 describe("the Knock Notifier", () => {
   function stubWorkflows() {
     const trigger = vi.fn<KnockWorkflows["trigger"]>().mockResolvedValue({});
@@ -93,7 +197,7 @@ describe("the Knock Notifier", () => {
   it("triggers the workflow named by the kind, identifying people inline", async () => {
     const { workflows, trigger } = stubWorkflows();
 
-    await createKnockNotifier(workflows, signingKey).send(
+    await createKnockNotifier(workflows, stubUsers().users, signingKey).send(
       newEnrollment([jo], sam)
     );
 
@@ -109,7 +213,7 @@ describe("the Knock Notifier", () => {
   it("drops the actor from the recipients", async () => {
     const { workflows, trigger } = stubWorkflows();
 
-    await createKnockNotifier(workflows, signingKey).send(
+    await createKnockNotifier(workflows, stubUsers().users, signingKey).send(
       newEnrollment([sam, jo], sam)
     );
 
@@ -119,7 +223,7 @@ describe("the Knock Notifier", () => {
   it("sends nothing when the actor was the only recipient", async () => {
     const { workflows, trigger } = stubWorkflows();
 
-    await createKnockNotifier(workflows, signingKey).send(
+    await createKnockNotifier(workflows, stubUsers().users, signingKey).send(
       newEnrollment([sam], sam)
     );
 
@@ -129,7 +233,7 @@ describe("the Knock Notifier", () => {
   it("sends no actor for a Notification that has none", async () => {
     const { workflows, trigger } = stubWorkflows();
 
-    await createKnockNotifier(workflows, signingKey).send({
+    await createKnockNotifier(workflows, stubUsers().users, signingKey).send({
       kind: "refund-request-declined",
       recipients: [jo],
       data: { course_title: "Test Course", course_slug: "test-course" },
@@ -145,6 +249,7 @@ describe("issuing an Inbox token", () => {
   it("signs RS256 for the Cadence user ID, valid for about an hour", async () => {
     const token = await createKnockNotifier(
       workflows,
+      stubUsers().users,
       signingKey
     ).issueInboxToken(42);
 
